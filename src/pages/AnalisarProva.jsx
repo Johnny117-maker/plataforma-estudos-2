@@ -3,7 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { extrairDeArquivo } from '../lib/extrairTexto';
 import { classificarQuestoesIA } from '../lib/iaService';
-import { cruzarFrequencias, serializarDocumentos } from '../lib/analiseProvas';
+import {
+  criarBlocosDeConteudo,
+  cruzarFrequencias,
+  filtrarSelecao,
+  resumirSelecao,
+  serializarDocumentos,
+} from '../lib/analiseProvas';
 import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { gerarCronogramaDaAnalise, salvarAnaliseProvas } from '../lib/transactionService';
 
@@ -17,6 +23,32 @@ async function sha256(file) {
 
 function hoje() { return new Date().toISOString().slice(0, 10); }
 function tamanho(bytes) { return bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
+
+function novoConteudoManual(hash) {
+  const id = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  return {
+    id: `${hash}-manual-${id}`,
+    numero: null,
+    pagina: null,
+    enunciado: '',
+    alternativas: [],
+    gabarito: null,
+    topico: null,
+    facilidade: null,
+    apoio: [],
+    caracteres: 0,
+    dependeDeVisual: false,
+    paraClassificar: '',
+    origem: 'conteudo_adicionado',
+    selecionada: true,
+  };
+}
+
+function rotuloConteudo(item, indice) {
+  if (item.origem === 'conteudo_adicionado') return `Conteúdo adicionado ${indice + 1}`;
+  if (item.numero) return `Questão ${item.numero}`;
+  return `Trecho extraído ${indice + 1}`;
+}
 
 export default function AnalisarProva() {
   const inputRef = useRef(null);
@@ -37,90 +69,409 @@ export default function AnalisarProva() {
     supabase.from('materias').select('id,nome,subgeneros(id,nome)').order('ordem').then(({ data }) => setMaterias(data || []));
   }, []);
 
-  const frequencias = useMemo(() => cruzarFrequencias(documentos), [documentos]);
-  const totalQuestoes = documentos.reduce((s, d) => s + d.questoes.length, 0);
-  const classificadas = documentos.reduce((s, d) => s + d.questoes.filter((q) => q.classificacao).length, 0);
+  const documentosSelecionados = useMemo(() => filtrarSelecao(documentos), [documentos]);
+  const selecao = useMemo(() => resumirSelecao(documentos), [documentos]);
+  const frequencias = useMemo(() => cruzarFrequencias(documentosSelecionados), [documentosSelecionados]);
+  const totalExtraido = documentos.reduce((s, d) => s + d.questoes.length, 0);
+
+  function invalidarAnalise() {
+    setAnaliseId(null);
+    setErro('');
+  }
 
   async function processar(files) {
-    const lista = [...files].slice(0, MAX_ARQUIVOS);
-    setErro(''); setAnaliseId(null);
+    const lista = [...files];
+    const vagas = MAX_ARQUIVOS - documentos.length;
+    setErro('');
+    setAnaliseId(null);
     if (!lista.length) return;
-    if (lista.some((f) => f.size > MAX_BYTES)) { setErro('Cada arquivo deve ter no máximo 25 MB.'); return; }
+    if (lista.length > vagas) {
+      setErro(`Você pode adicionar mais ${vagas} arquivo(s). O limite por análise é ${MAX_ARQUIVOS}.`);
+      return;
+    }
+    if (lista.some((f) => f.size > MAX_BYTES)) {
+      setErro('Cada arquivo deve ter no máximo 25 MB.');
+      return;
+    }
+
     setProcessando(true);
     const saida = [];
+    const hashes = new Set(documentos.map((doc) => doc.hash));
     try {
       for (let i = 0; i < lista.length; i += 1) {
         const file = lista[i];
-        setProgresso(`Extraindo ${i + 1}/${lista.length}: ${file.name}`);
-        const extracao = await extrairDeArquivo(file, (p, t) => setProgresso(`${file.name}: página ${p}/${t}`));
+        setProgresso(`Preparando ${i + 1}/${lista.length}: ${file.name}`);
         const hash = await sha256(file);
+        if (hashes.has(hash)) continue;
+        hashes.add(hash);
+
+        const extracao = await extrairDeArquivo(file, (p, t) => setProgresso(`${file.name}: página ${p}/${t}`));
         if (extracao.provavelDigitalizado) {
-          saida.push({ nome: file.name, tipo: extracao.tipo, tamanho: file.size, totalPaginas: extracao.totalPaginas, hash, texto: '', perfil, avisos: ['PDF digitalizado: OCR necessário.'], questoes: [], erro: 'Sem texto embutido' });
+          saida.push({
+            nome: file.name,
+            tipo: extracao.tipo,
+            tamanho: file.size,
+            totalPaginas: extracao.totalPaginas,
+            hash,
+            texto: '',
+            perfil,
+            selecionado: false,
+            avisos: ['PDF digitalizado: OCR necessário antes de selecionar conteúdo.'],
+            questoes: [],
+            erro: 'Sem texto embutido',
+          });
           continue;
         }
+
         const { linhas } = limparLinhas(extracao.linhas);
         const seg = segmentarQuestoes(linhas, perfil);
+        const prefixo = hash.slice(0, 12);
+        const questoesDetectadas = seg.questoes.map((questao, indice) => ({
+          ...questao,
+          id: `${prefixo}-questao-${questao.numero}-${indice}`,
+          origem: 'questao_detectada',
+          selecionada: true,
+        }));
+        const questoes = questoesDetectadas.length
+          ? questoesDetectadas
+          : criarBlocosDeConteudo(linhas, prefixo);
+        const avisos = [...seg.avisos];
+        if (!questoesDetectadas.length && questoes.length) {
+          avisos.push('A numeração não foi reconhecida; o texto foi dividido em trechos selecionáveis.');
+        }
+
         saida.push({
-          nome: file.name, tipo: extracao.tipo, tamanho: file.size, totalPaginas: extracao.totalPaginas,
-          hash, texto: linhas.map((l) => l.texto).join('\n'), perfil: seg.perfilUsado,
-          avisos: seg.avisos, questoes: seg.questoes.map((q, qi) => ({ ...q, id: `${i}-${q.numero}-${qi}` })),
+          nome: file.name,
+          tipo: extracao.tipo,
+          tamanho: file.size,
+          totalPaginas: extracao.totalPaginas,
+          hash,
+          texto: linhas.map((linha) => linha.texto).join('\n'),
+          perfil: seg.perfilUsado,
+          selecionado: true,
+          avisos,
+          questoes,
         });
       }
-      setDocumentos(saida);
-    } catch (error) { setErro(error.message); }
-    finally { setProcessando(false); setProgresso(''); }
+
+      if (!saida.length) setErro('Os arquivos escolhidos já foram adicionados.');
+      else setDocumentos((atuais) => [...atuais, ...saida]);
+    } catch (error) {
+      setErro(error.message);
+    } finally {
+      setProcessando(false);
+      setProgresso('');
+      if (inputRef.current) inputRef.current.value = '';
+    }
+  }
+
+  function alterarDocumento(hash, atualizador) {
+    invalidarAnalise();
+    setDocumentos((atuais) => atuais.map((doc) => (doc.hash === hash ? atualizador(doc) : doc)));
+  }
+
+  function selecionarDocumento(hash, selecionado) {
+    alterarDocumento(hash, (doc) => ({ ...doc, selecionado }));
+  }
+
+  function selecionarConteudos(hash, selecionada) {
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      selecionado: selecionada ? true : doc.selecionado,
+      questoes: doc.questoes.map((questao) => ({ ...questao, selecionada })),
+    }));
+  }
+
+  function atualizarConteudo(hash, id, texto) {
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      questoes: doc.questoes.map((questao) => (questao.id === id
+        ? { ...questao, enunciado: texto, paraClassificar: texto, caracteres: texto.length, classificacao: null }
+        : questao)),
+    }));
+  }
+
+  function selecionarConteudo(hash, id, selecionada) {
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      selecionado: selecionada ? true : doc.selecionado,
+      questoes: doc.questoes.map((questao) => (questao.id === id ? { ...questao, selecionada } : questao)),
+    }));
+  }
+
+  function adicionarConteudo(hash) {
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      selecionado: true,
+      questoes: [...doc.questoes, novoConteudoManual(hash)],
+    }));
+  }
+
+  function removerConteudo(hash, id) {
+    alterarDocumento(hash, (doc) => ({ ...doc, questoes: doc.questoes.filter((questao) => questao.id !== id) }));
+  }
+
+  function removerDocumento(hash) {
+    invalidarAnalise();
+    setDocumentos((atuais) => atuais.filter((doc) => doc.hash !== hash));
+  }
+
+  function selecionarTodos(selecionada) {
+    invalidarAnalise();
+    setDocumentos((atuais) => atuais.map((doc) => ({
+      ...doc,
+      selecionado: selecionada && !doc.erro,
+      questoes: doc.questoes.map((questao) => ({ ...questao, selecionada: selecionada && !doc.erro })),
+    })));
   }
 
   async function classificar() {
-    setErro(''); setProcessando(true);
+    setErro('');
+    setAnaliseId(null);
+    setProcessando(true);
     try {
-      const questoes = documentos.flatMap((d) => d.questoes);
-      const resultados = await classificarQuestoesIA(questoes, materias, (atual, total) => setProgresso(`Classificando lote ${atual}/${total}`));
-      const porId = new Map(resultados.map((r) => [String(r.id), r]));
-      setDocumentos((atuais) => atuais.map((d) => ({ ...d, questoes: d.questoes.map((q) => ({ ...q, classificacao: porId.get(String(q.id)) || null })) })));
-    } catch (error) { setErro(error.message); }
-    finally { setProcessando(false); setProgresso(''); }
+      const itens = documentosSelecionados.flatMap((doc) => doc.questoes);
+      if (!itens.length) throw new Error('Selecione pelo menos um conteúdo com texto para classificar.');
+      const resultados = await classificarQuestoesIA(itens, materias, (atual, total) => setProgresso(`Classificando lote ${atual}/${total}`));
+      const porId = new Map(resultados.map((resultado) => [String(resultado.id), resultado]));
+      setDocumentos((atuais) => atuais.map((doc) => ({
+        ...doc,
+        questoes: doc.questoes.map((questao) => ({
+          ...questao,
+          classificacao: porId.get(String(questao.id)) || questao.classificacao || null,
+        })),
+      })));
+    } catch (error) {
+      setErro(error.message);
+    } finally {
+      setProcessando(false);
+      setProgresso('');
+    }
   }
 
   async function salvar() {
-    setErro(''); setProcessando(true); setProgresso('Salvando análise e cruzamento…');
-    try { setAnaliseId(await salvarAnaliseProvas(nome, serializarDocumentos(documentos))); }
-    catch (error) { setErro(error.message); }
-    finally { setProcessando(false); setProgresso(''); }
+    setErro('');
+    setProcessando(true);
+    setProgresso('Salvando a seleção e o cruzamento…');
+    try {
+      if (!selecao.conteudos) throw new Error('Selecione pelo menos um conteúdo.');
+      setAnaliseId(await salvarAnaliseProvas(nome, serializarDocumentos(documentosSelecionados)));
+    } catch (error) {
+      setErro(error.message);
+    } finally {
+      setProcessando(false);
+      setProgresso('');
+    }
   }
 
   async function gerarCronograma() {
-    setErro(''); setProcessando(true); setProgresso('Gerando cronograma por prioridade…');
-    try { navigate(`/cronogramas/${await gerarCronogramaDaAnalise(analiseId, dataInicio, dataFinal, Number(horas))}`); }
-    catch (error) { setErro(error.message); setProcessando(false); setProgresso(''); }
+    setErro('');
+    setProcessando(true);
+    setProgresso('Gerando cronograma com os conteúdos selecionados…');
+    try {
+      const cronogramaId = await gerarCronogramaDaAnalise(analiseId, dataInicio, dataFinal, Number(horas));
+      navigate(`/cronogramas/${cronogramaId}`);
+    } catch (error) {
+      setErro(error.message);
+      setProcessando(false);
+      setProgresso('');
+    }
   }
 
   function exportar() {
-    const blob = new Blob([JSON.stringify({ nome, documentos: serializarDocumentos(documentos), frequencias }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'analise-provas.json'; a.click(); URL.revokeObjectURL(url);
+    const blob = new Blob([
+      JSON.stringify({ nome, documentos: serializarDocumentos(documentosSelecionados), frequencias }, null, 2),
+    ], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'analise-provas-selecao.json';
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
     <div>
-      <h2>Analisar múltiplas provas</h2>
-      <p className="page-description">Envie até 20 provas. A extração acontece no navegador; somente os textos segmentados são enviados em pequenos lotes para classificação quando você solicitar.</p>
+      <h2>Montar cronograma a partir de provas</h2>
+      <p className="page-description">
+        Envie um ou vários arquivos, escolha exatamente quais questões ou trechos devem entrar e gere um cronograma baseado somente no conteúdo selecionado. A extração acontece no navegador; os PDFs originais não são enviados à IA.
+      </p>
+
       <div className="toolbar responsive-toolbar">
-        <select value={perfil} onChange={(e) => setPerfil(e.target.value)}>{Object.entries(PERFIS).map(([id, p]) => <option key={id} value={id}>{p.rotulo}</option>)}</select>
-        <input value={nome} onChange={(e) => setNome(e.target.value)} aria-label="Nome da análise" />
+        <select value={perfil} onChange={(event) => setPerfil(event.target.value)} aria-label="Modelo de prova">
+          {Object.entries(PERFIS).map(([id, item]) => <option key={id} value={id}>{item.rotulo}</option>)}
+        </select>
+        <input
+          value={nome}
+          onChange={(event) => { setNome(event.target.value); setAnaliseId(null); }}
+          aria-label="Nome da análise"
+          placeholder="Nome da análise"
+        />
       </div>
-      <div className="card file-drop" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); processar(e.dataTransfer.files); }}>
-        <input ref={inputRef} hidden multiple type="file" accept=".pdf,.docx,.txt,.md" onChange={(e) => processar(e.target.files)} />
-        <strong>Clique ou arraste várias provas</strong><span>PDF, DOCX, TXT ou Markdown · até {MAX_ARQUIVOS} arquivos</span>
+
+      <div
+        className="card file-drop"
+        onClick={() => inputRef.current?.click()}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => { event.preventDefault(); processar(event.dataTransfer.files); }}
+      >
+        <input
+          ref={inputRef}
+          hidden
+          multiple
+          type="file"
+          accept=".pdf,.docx,.txt,.md"
+          onChange={(event) => processar(event.target.files)}
+        />
+        <strong>Clique ou arraste uma ou várias provas</strong>
+        <span>PDF, DOCX, TXT ou Markdown · até {MAX_ARQUIVOS} arquivos · 25 MB por arquivo</span>
       </div>
+
       {processando && <div className="empty-state">{progresso || 'Processando…'}</div>}
       {erro && <div className="form-error card">{erro}</div>}
-      {documentos.length > 0 && <>
-        <div className="stats-grid"><div className="card"><strong>{documentos.length}</strong><span>documentos</span></div><div className="card"><strong>{totalQuestoes}</strong><span>questões</span></div><div className="card"><strong>{classificadas}</strong><span>classificadas</span></div><div className="card"><strong>{frequencias.length}</strong><span>assuntos</span></div></div>
-        <div className="button-row wrap"><button className="btn btn-primary" onClick={classificar} disabled={processando || !totalQuestoes}>Classificar com IA</button><button className="btn" onClick={salvar} disabled={processando || classificadas !== totalQuestoes || !totalQuestoes}>Salvar análise</button><button className="btn" onClick={exportar}>Exportar JSON</button></div>
-        <div className="card table-scroll"><table className="data-table"><thead><tr><th>Matéria</th><th>Assunto</th><th>Provas</th><th>Questões</th><th>Frequência</th></tr></thead><tbody>{frequencias.map((f) => <tr key={`${f.materia}-${f.assunto}`}><td>{f.materia}</td><td>{f.assunto}</td><td>{f.documentos}/{documentos.length}</td><td>{f.questoes}</td><td>{(f.percentual * 100).toFixed(1)}%</td></tr>)}</tbody></table></div>
-        <div className="document-grid">{documentos.map((d, i) => <div className="card" key={`${d.hash}-${i}`}><strong>{d.nome}</strong><span>{tamanho(d.tamanho)} · {d.totalPaginas} pág. · {d.questoes.length} questões</span>{d.erro && <span className="form-error">{d.erro}</span>}{d.avisos?.map((a) => <small key={a}>{a}</small>)}</div>)}</div>
-      </>}
-      {analiseId && <div className="card schedule-generator"><h3>Gerar cronograma pela frequência</h3><p>Assuntos recorrentes em mais provas recebem prioridade maior.</p><div className="responsive-form-row"><label>Início<input type="date" value={dataInicio} onChange={(e) => setDataInicio(e.target.value)} /></label><label>Fim<input type="date" value={dataFinal} onChange={(e) => setDataFinal(e.target.value)} /></label><label>Horas/dia<input type="number" min="0.5" step="0.5" value={horas} onChange={(e) => setHoras(e.target.value)} /></label></div><button className="btn btn-primary" disabled={!dataFinal || processando} onClick={gerarCronograma}>Criar cronograma automático</button></div>}
+
+      {documentos.length > 0 && (
+        <>
+          <div className="stats-grid">
+            <div className="card"><strong>{documentos.length}</strong><span>arquivos adicionados</span></div>
+            <div className="card"><strong>{selecao.documentos}</strong><span>arquivos selecionados</span></div>
+            <div className="card"><strong>{selecao.conteudos}</strong><span>conteúdos selecionados</span></div>
+            <div className="card"><strong>{selecao.classificados}</strong><span>conteúdos classificados</span></div>
+          </div>
+
+          <div className="selection-summary card">
+            <div>
+              <strong>Seleção usada no cronograma</strong>
+              <span>{selecao.conteudos} de {totalExtraido} conteúdo(s), em {selecao.documentos} arquivo(s).</span>
+            </div>
+            <div className="button-row wrap compact-row">
+              <button className="btn" type="button" onClick={() => selecionarTodos(true)}>Selecionar tudo</button>
+              <button className="btn" type="button" onClick={() => selecionarTodos(false)}>Limpar seleção</button>
+            </div>
+          </div>
+
+          <div className="document-review-list">
+            {documentos.map((doc) => {
+              const escolhidos = doc.questoes.filter((questao) => questao.selecionada !== false && String(questao.paraClassificar || '').trim()).length;
+              return (
+                <article className={`card document-review${doc.selecionado === false ? ' is-disabled' : ''}`} key={doc.hash}>
+                  <div className="document-review-header">
+                    <label className="selection-label">
+                      <input
+                        type="checkbox"
+                        checked={doc.selecionado !== false}
+                        disabled={Boolean(doc.erro)}
+                        onChange={(event) => selecionarDocumento(doc.hash, event.target.checked)}
+                      />
+                      <span>
+                        <strong>{doc.nome}</strong>
+                        <small>{tamanho(doc.tamanho)} · {doc.totalPaginas} pág. · {escolhidos}/{doc.questoes.length} conteúdo(s)</small>
+                      </span>
+                    </label>
+                    <button className="btn btn-danger-text" type="button" onClick={() => removerDocumento(doc.hash)}>Remover arquivo</button>
+                  </div>
+
+                  {doc.erro && <span className="form-error">{doc.erro}</span>}
+                  {doc.avisos?.map((aviso) => <small className="document-warning" key={aviso}>{aviso}</small>)}
+
+                  {!doc.erro && (
+                    <details className="content-review" open={documentos.length === 1}>
+                      <summary>Revisar e escolher conteúdos</summary>
+                      <div className="button-row wrap compact-row">
+                        <button className="btn" type="button" onClick={() => selecionarConteudos(doc.hash, true)}>Marcar todos</button>
+                        <button className="btn" type="button" onClick={() => selecionarConteudos(doc.hash, false)}>Desmarcar todos</button>
+                        <button className="btn" type="button" onClick={() => adicionarConteudo(doc.hash)}>+ Adicionar conteúdo</button>
+                      </div>
+
+                      <div className="content-items">
+                        {doc.questoes.map((item, indice) => (
+                          <div className={`content-item${item.selecionada === false ? ' is-disabled' : ''}`} key={item.id}>
+                            <div className="content-item-header">
+                              <label className="selection-label">
+                                <input
+                                  type="checkbox"
+                                  checked={item.selecionada !== false}
+                                  onChange={(event) => selecionarConteudo(doc.hash, item.id, event.target.checked)}
+                                />
+                                <strong>{rotuloConteudo(item, indice)}</strong>
+                              </label>
+                              <div className="content-badges">
+                                {item.pagina && <span>Página {item.pagina}</span>}
+                                {item.classificacao && <span>{item.classificacao.materia_nome} · {item.classificacao.assunto_nome}</span>}
+                                {item.origem === 'conteudo_adicionado' && (
+                                  <button className="text-button" type="button" onClick={() => removerConteudo(doc.hash, item.id)}>Excluir</button>
+                                )}
+                              </div>
+                            </div>
+                            <textarea
+                              rows="5"
+                              value={item.paraClassificar || ''}
+                              placeholder="Informe ou ajuste o conteúdo que deverá ser considerado no cronograma."
+                              onChange={(event) => atualizarConteudo(doc.hash, item.id, event.target.value)}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="button-row wrap">
+            <button className="btn btn-primary" onClick={classificar} disabled={processando || !selecao.conteudos}>
+              Classificar seleção com IA
+            </button>
+            <button
+              className="btn"
+              onClick={salvar}
+              disabled={processando || !selecao.conteudos || selecao.classificados !== selecao.conteudos}
+            >
+              Salvar conteúdos selecionados
+            </button>
+            <button className="btn" onClick={exportar} disabled={!selecao.conteudos}>Exportar seleção JSON</button>
+          </div>
+
+          {selecao.conteudos > 0 && selecao.classificados !== selecao.conteudos && (
+            <p className="selection-help">Classifique todos os conteúdos selecionados antes de salvar e gerar o cronograma.</p>
+          )}
+
+          {frequencias.length > 0 && (
+            <div className="card table-scroll">
+              <table className="data-table">
+                <thead><tr><th>Matéria</th><th>Assunto</th><th>Arquivos</th><th>Conteúdos</th><th>Frequência</th></tr></thead>
+                <tbody>
+                  {frequencias.map((item) => (
+                    <tr key={`${item.materia}-${item.assunto}`}>
+                      <td>{item.materia}</td>
+                      <td>{item.assunto}</td>
+                      <td>{item.documentos}/{selecao.documentos}</td>
+                      <td>{item.questoes}</td>
+                      <td>{(item.percentual * 100).toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {analiseId && (
+        <div className="card schedule-generator">
+          <h3>Gerar cronograma com a seleção salva</h3>
+          <p>Os assuntos recorrentes nos arquivos e conteúdos escolhidos receberão prioridade maior.</p>
+          <div className="responsive-form-row">
+            <label>Início<input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} /></label>
+            <label>Fim<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
+            <label>Horas/dia<input type="number" min="0.5" step="0.5" value={horas} onChange={(event) => setHoras(event.target.value)} /></label>
+          </div>
+          <button className="btn btn-primary" disabled={!dataFinal || processando} onClick={gerarCronograma}>
+            Criar cronograma automático
+          </button>
+        </div>
+      )}
     </div>
   );
 }

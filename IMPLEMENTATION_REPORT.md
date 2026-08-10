@@ -1,5 +1,21 @@
 # Relatório de implementação
 
+## Atualização: cronograma por conteúdo selecionado
+
+O analisador de provas agora permite combinar um ou mais conteúdos de um ou mais arquivos antes de gerar o cronograma:
+
+- novos envios são acrescentados à análise atual;
+- arquivos duplicados são identificados por SHA-256 e ignorados;
+- cada arquivo pode ser incluído ou excluído;
+- cada questão ou trecho pode ser selecionado individualmente;
+- o texto selecionado pode ser revisado e editado;
+- conteúdos complementares podem ser adicionados ao arquivo;
+- documentos sem questões reconhecidas são divididos em trechos de até 3.000 caracteres;
+- somente a seleção é classificada, persistida e considerada nas frequências;
+- o cronograma continua sendo criado pela RPC transacional existente.
+
+Não foi necessária uma nova migration. Os conteúdos utilizam `questoes_extraidas` e registram sua origem em `metadados.origem` como `questao_detectada`, `trecho_extraido` ou `conteudo_adicionado`.
+
 ## Escopo concluído
 
 | Item | Resultado |

@@ -14,13 +14,14 @@
 flowchart TD
   A[Arquivos locais] --> B[Extração]
   B --> C[Segmentação]
-  C --> D[Classificação em lotes]
-  D --> E[Persistência transacional]
-  E --> F[Frequência por assunto]
-  F --> G[Cronograma priorizado]
+  C --> D[Seleção e edição]
+  D --> E[Classificação em lotes]
+  E --> F[Persistência transacional]
+  F --> G[Frequência por assunto]
+  G --> H[Cronograma priorizado]
 ```
 
-Os arquivos originais não são enviados à IA. A classificação recebe somente o texto necessário de cada questão, limitado por tamanho e agrupado em lotes.
+Os arquivos originais não são enviados à IA. O usuário escolhe arquivos e conteúdos individualmente. Questões reconhecidas, trechos automáticos e conteúdos complementares usam a mesma estrutura de classificação. A Edge Function recebe somente o texto selecionado, limitado por tamanho e agrupado em lotes. A persistência também salva somente essa seleção.
 
 ## Modelo de dados novo
 

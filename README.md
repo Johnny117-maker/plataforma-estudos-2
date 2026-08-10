@@ -11,7 +11,8 @@ Esta versão inclui:
 - criação, importação, duplicação e reorganização atômicas;
 - perguntas de múltipla escolha, verdadeiro/falso e dissertativas;
 - upload simultâneo de até 20 provas PDF, DOCX, TXT ou Markdown;
-- extração local, segmentação, classificação em lotes por IA e cruzamento de assuntos;
+- extração local, seleção por arquivo e por conteúdo, classificação em lotes por IA e cruzamento de assuntos;
+- combinação de questões, trechos extraídos e conteúdos complementares de uma ou várias provas;
 - persistência de documentos, questões classificadas e frequências;
 - geração automática de cronograma com prioridade baseada na recorrência;
 - notas hierárquicas em blocos;
@@ -37,7 +38,7 @@ flowchart TD
 
 ## Requisitos
 
-- Node.js 20+
+- Node.js 20.19+ ou 22.12+
 - npm 10+
 - projeto Supabase
 - Supabase CLI para aplicar migrações e publicar a função
@@ -108,12 +109,16 @@ npm run check
 
 1. Cadastre matérias e assuntos para melhorar a correspondência por IDs.
 2. Abra **Analisar múltiplas provas**.
-3. Envie de 1 a 20 arquivos, com até 25 MB cada.
-4. Revise o total de questões e os avisos de segmentação.
-5. Clique em **Classificar com IA**.
-6. Confira a tabela cruzada de matéria, assunto, número de provas e frequência.
-7. Salve a análise.
-8. Informe início, fim e horas por dia para gerar o cronograma.
+3. Envie de 1 a 20 arquivos, com até 25 MB cada. Novos envios são adicionados aos anteriores e arquivos duplicados são ignorados pelo hash.
+4. Marque os arquivos que deverão participar da análise.
+5. Abra **Revisar e escolher conteúdos** em cada arquivo.
+6. Marque uma ou várias questões/trechos, edite o texto quando necessário ou use **Adicionar conteúdo**.
+7. Clique em **Classificar seleção com IA**.
+8. Confira a tabela cruzada de matéria, assunto, arquivos e frequência.
+9. Clique em **Salvar conteúdos selecionados**.
+10. Informe início, fim e horas por dia para gerar o cronograma.
+
+Quando a numeração das questões não é reconhecida, o texto é dividido automaticamente em trechos selecionáveis de até 3.000 caracteres. Somente os arquivos e conteúdos escolhidos são enviados para classificação e persistidos na análise; conteúdos desmarcados não influenciam a frequência nem o cronograma.
 
 O peso usado na priorização combina quantidade de questões e presença em documentos diferentes. Assim, repetição dentro de uma única prova não vale o mesmo que recorrência em várias provas.
 

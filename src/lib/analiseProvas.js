@@ -25,6 +25,85 @@ export function cruzarFrequencias(documentos) {
     .sort((a, b) => b.peso - a.peso || b.questoes - a.questoes);
 }
 
+/**
+ * Cria unidades selecionáveis quando o documento não possui um padrão de
+ * questões reconhecível. Os blocos ficam pequenos o suficiente para a Edge
+ * Function classificar sem enviar o PDF original.
+ */
+export function criarBlocosDeConteudo(linhas, prefixo = 'conteudo', limite = 3000) {
+  const blocos = [];
+  let atual = [];
+  let caracteres = 0;
+  let pagina = 1;
+
+  function concluir() {
+    const texto = atual.join('\n').trim();
+    if (!texto) return;
+    const indice = blocos.length + 1;
+    blocos.push({
+      id: `${prefixo}-trecho-${indice}`,
+      numero: null,
+      pagina,
+      enunciado: texto,
+      alternativas: [],
+      gabarito: null,
+      topico: null,
+      facilidade: null,
+      apoio: [],
+      caracteres: texto.length,
+      dependeDeVisual: false,
+      paraClassificar: texto,
+      origem: 'trecho_extraido',
+      selecionada: true,
+    });
+    atual = [];
+    caracteres = 0;
+  }
+
+  for (const linha of linhas || []) {
+    const partes = String(linha.texto || '').match(new RegExp(`.{1,${limite}}`, 'gs')) || [];
+    for (const parteBruta of partes) {
+      const parte = parteBruta.trim();
+      if (!parte) continue;
+      if (atual.length && caracteres + parte.length + 1 > limite) concluir();
+      if (!atual.length) pagina = linha.pagina || 1;
+      atual.push(parte);
+      caracteres += parte.length + 1;
+    }
+  }
+  concluir();
+  return blocos;
+}
+
+/** Retorna somente arquivos e conteúdos escolhidos pelo usuário. */
+export function filtrarSelecao(documentos) {
+  return (documentos || [])
+    .filter((doc) => doc.selecionado !== false)
+    .map((doc) => {
+      const questoes = (doc.questoes || []).filter(
+        (questao) => questao.selecionada !== false && String(questao.paraClassificar || questao.enunciado || '').trim()
+      );
+      return {
+        ...doc,
+        questoes,
+        // A persistência recebe apenas o texto escolhido, nunca o conteúdo
+        // integral de um arquivo parcialmente selecionado.
+        texto: questoes.map((questao) => questao.paraClassificar || questao.enunciado).join('\n\n'),
+      };
+    })
+    .filter((doc) => doc.questoes.length > 0);
+}
+
+export function resumirSelecao(documentos) {
+  const selecionados = filtrarSelecao(documentos);
+  const conteudos = selecionados.flatMap((doc) => doc.questoes);
+  return {
+    documentos: selecionados.length,
+    conteudos: conteudos.length,
+    classificados: conteudos.filter((item) => item.classificacao).length,
+  };
+}
+
 export function serializarDocumentos(documentos) {
   return documentos.map((doc) => ({
     nome_arquivo: doc.nome,
@@ -48,7 +127,12 @@ export function serializarDocumentos(documentos) {
       dificuldade: q.classificacao?.dificuldade || 'media',
       confianca: q.classificacao?.confianca ?? null,
       depende_de_visual: q.dependeDeVisual,
-      metadados: { topico: q.topico, facilidade: q.facilidade, apoio: q.apoio?.map((a) => a.rotulo) || [] },
+      metadados: {
+        origem: q.origem || 'questao_detectada',
+        topico: q.topico,
+        facilidade: q.facilidade,
+        apoio: q.apoio?.map((a) => a.rotulo) || [],
+      },
     })),
   }));
 }

@@ -1,0 +1,2 @@
+[functions.ia]
+verify_jwt = true

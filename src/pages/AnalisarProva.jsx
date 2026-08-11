@@ -1,11 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
-import { aplicarCache } from '../lib/cacheClassificacao';
-import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 import { extrairDeArquivo } from '../lib/extrairTexto';
 import { classificarQuestoesIA } from '../lib/iaService';
-
 import {
   criarBlocosDeConteudo,
   cruzarFrequencias,
@@ -15,7 +12,9 @@ import {
 } from '../lib/analiseProvas';
 import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
+import { aplicarCache } from '../lib/cacheClassificacao';
 import { gerarCronogramaDaAnalise, salvarAnaliseProvas } from '../lib/transactionService';
+import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
 const MAX_ARQUIVOS = 20;
 const MAX_BYTES = 25 * 1024 * 1024;
@@ -26,7 +25,23 @@ async function sha256(file) {
 }
 
 function hoje() { return new Date().toISOString().slice(0, 10); }
-function tamanho(bytes) { return bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`; }
+function tamanho(bytes) {
+  return bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+// As provas recentes da Fatec são temáticas: um fio condutor único costura as
+// 54 questões. Saber o tema ajuda a IA a NÃO classificar pelo assunto do
+// enunciado — numa prova sobre alimentação, a questão da cafeína é
+// estequiometria, não biologia.
+const RE_TEMA = /^\s*(?:prezado|caro)\(a\) candidato\(a\)/i;
+
+function detectarContextoProva(linhas) {
+  const indice = linhas.findIndex((linha) => RE_TEMA.test(linha.texto));
+  if (indice < 0) return null;
+  const trecho = linhas.slice(indice + 1, indice + 8).map((l) => l.texto).join(' ');
+  const limpo = trecho.replace(/\s+/g, ' ').trim();
+  return limpo.length > 60 ? limpo.slice(0, 300) : null;
+}
 
 function novoConteudoManual(hash) {
   const id = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
@@ -63,6 +78,7 @@ export default function AnalisarProva() {
   const [processando, setProcessando] = useState(false);
   const [progresso, setProgresso] = useState('');
   const [erro, setErro] = useState('');
+  const [aviso, setAviso] = useState('');
   const [analiseId, setAnaliseId] = useState(null);
   const [nome, setNome] = useState('Análise comparativa de provas');
   const [dataInicio, setDataInicio] = useState(hoje());
@@ -70,14 +86,21 @@ export default function AnalisarProva() {
   const [horas, setHoras] = useState('2');
 
   useEffect(() => {
-    supabase.from('materias').select('id,nome,subgeneros(id,nome)').order('ordem').then(({ data }) => setMaterias(data || []));
+    supabase
+      .from('materias')
+      .select('id,nome,subgeneros(id,nome)')
+      .order('ordem')
+      .then(({ data }) => setMaterias(data || []));
   }, []);
 
   const documentosSelecionados = useMemo(() => filtrarSelecao(documentos), [documentos]);
   const selecao = useMemo(() => resumirSelecao(documentos), [documentos]);
   const frequencias = useMemo(() => cruzarFrequencias(documentosSelecionados), [documentosSelecionados]);
-  const totalExtraido = documentos.reduce((s, d) => s + d.questoes.length, 0);
+  const totalExtraido = documentos.reduce((soma, doc) => soma + doc.questoes.length, 0);
   const semClassificacao = selecao.conteudos - selecao.classificados;
+  const baixaConfianca = documentosSelecionados
+    .flatMap((doc) => doc.questoes)
+    .filter((q) => q.classificacao && Number(q.classificacao.confianca) < 0.6).length;
 
   function invalidarAnalise() {
     setAnaliseId(null);
@@ -88,6 +111,7 @@ export default function AnalisarProva() {
     const lista = [...files];
     const vagas = MAX_ARQUIVOS - documentos.length;
     setErro('');
+    setAviso('');
     setAnaliseId(null);
     if (!lista.length) return;
     if (lista.length > vagas) {
@@ -120,6 +144,7 @@ export default function AnalisarProva() {
             hash,
             texto: '',
             perfil,
+            contexto: null,
             selecionado: false,
             avisos: ['PDF digitalizado: OCR necessário antes de selecionar conteúdo.'],
             questoes: [],
@@ -148,22 +173,30 @@ export default function AnalisarProva() {
 
         const avisos = [...seg.avisos];
         if (religadas) {
-          avisos.push(`${religadas} cabeçalho(s) de questão foram remontados a partir de fragmentos separados.`);
+          avisos.push(`${religadas} cabeçalho(s) de questão remontados a partir de fragmentos separados.`);
         }
         if (!questoesDetectadas.length && questoes.length) {
           avisos.push('A numeração não foi reconhecida; o texto foi dividido em trechos selecionáveis.');
         }
 
-        // Muitos cadernos declaram a matéria de cada bloco ("MULTIDISCIPLINAR",
-        // "QUÍMICA", "HISTÓRIA"...). Onde existe, classifica de graça e com
-        // precisão maior que a da IA. Onde não existe, não faz nada.
+        // Cadernos até 2020 declaram a matéria de cada bloco. Onde existe, a
+        // matéria é travada e a IA gasta o raciocínio só no assunto granular.
         if (questoesDetectadas.length) {
           const { porNumero, areas } = mapearAreas(linhas, questoesDetectadas);
           if (areas.length) {
             const comArea = aplicarAreas(questoesDetectadas, porNumero, materias);
-            avisos.push(`${comArea} de ${questoesDetectadas.length} questão(ões) classificadas pelos ${areas.length} cabeçalhos de área do caderno, sem usar IA.`);
+            for (const questao of questoesDetectadas) {
+              if (questao.classificacao?.origem === 'cabecalho_de_area') {
+                questao.materiaConhecida = questao.classificacao.materia_nome;
+                questao.classificacao = null;
+              }
+            }
+            avisos.push(`${comArea} de ${questoesDetectadas.length} questão(ões) tiveram a matéria confirmada pelos ${areas.length} cabeçalhos de área do caderno.`);
           }
         }
+
+        const contexto = detectarContextoProva(linhas);
+        if (contexto) avisos.push('Prova temática: o tema do caderno será informado à IA como contexto.');
 
         saida.push({
           nome: file.name,
@@ -173,6 +206,7 @@ export default function AnalisarProva() {
           hash,
           texto: linhas.map((linha) => linha.texto).join('\n'),
           perfil: seg.perfilUsado,
+          contexto,
           selecionado: true,
           avisos,
           questoes,
@@ -211,7 +245,14 @@ export default function AnalisarProva() {
     alterarDocumento(hash, (doc) => ({
       ...doc,
       questoes: doc.questoes.map((questao) => (questao.id === id
-        ? { ...questao, enunciado: texto, paraClassificar: texto, caracteres: texto.length, classificacao: null }
+        ? {
+          ...questao,
+          enunciado: texto,
+          paraClassificar: texto,
+          caracteres: texto.length,
+          classificacao: null,
+          hashConteudo: undefined,
+        }
         : questao)),
     }));
   }
@@ -233,7 +274,10 @@ export default function AnalisarProva() {
   }
 
   function removerConteudo(hash, id) {
-    alterarDocumento(hash, (doc) => ({ ...doc, questoes: doc.questoes.filter((questao) => questao.id !== id) }));
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      questoes: doc.questoes.filter((questao) => questao.id !== id),
+    }));
   }
 
   function removerDocumento(hash) {
@@ -252,34 +296,29 @@ export default function AnalisarProva() {
 
   async function classificar() {
     setErro('');
+    setAviso('');
     setAnaliseId(null);
     setProcessando(true);
-
-    setProgresso('Consultando o que já foi classificado antes…');
-    const todas = documentosSelecionados.flatMap((doc) => doc.questoes);
-    const cache = await aplicarCache(todas);
-    if (cache.aplicadas) {
-      setDocumentos((atuais) => [...atuais]);   // força o re-render
-      setProgresso(`${cache.aplicadas} reaproveitadas do cache.`);
-    }
-
-    const itens = todas.filter((questao) => !questao.classificacao);
-      if (!itens.length) {
-        setErro(`Tudo já estava classificado — ${cache.aplicadas} vieram do cache, sem chamar a IA.`);
-      return;
-    }
-    
     try {
-      const itens = documentosSelecionados
-        .flatMap((doc) => doc.questoes)
-        .filter((questao) => !questao.classificacao);
+      const todas = documentosSelecionados.flatMap((doc) => doc.questoes);
+
+      // O cache vem primeiro: cada questão passa pela IA uma vez na vida.
+      // Subir a mesma prova de novo, ou uma edição que reaproveite enunciados,
+      // não custa chamada nenhuma.
+      setProgresso('Consultando o que já foi classificado antes…');
+      const cache = await aplicarCache(todas);
+      if (cache.aplicadas) setDocumentos((atuais) => [...atuais]);
+
+      const itens = todas.filter((questao) => !questao.classificacao);
       if (!itens.length) {
-        setErro('Todos os conteúdos selecionados já estão classificados.');
+        setAviso(cache.aplicadas
+          ? `Tudo já estava classificado — ${cache.aplicadas} vieram do cache, sem chamar a IA.`
+          : 'Todos os conteúdos selecionados já estão classificados.');
         return;
       }
 
       const aplicar = (lista) => {
-        const porId = new Map(lista.map((r) => [String(r.id), r]));
+        const porId = new Map(lista.map((item) => [String(item.id), item]));
         setDocumentos((atuais) => atuais.map((doc) => ({
           ...doc,
           questoes: doc.questoes.map((questao) => ({
@@ -289,20 +328,29 @@ export default function AnalisarProva() {
         })));
       };
 
+      const contextoProva = documentosSelecionados.find((doc) => doc.contexto)?.contexto || null;
+
       const resultado = await classificarQuestoesIA(
         itens,
         materias,
         (atual, total, mensagem) => setProgresso(mensagem || `Lote ${atual}/${total}`),
         aplicar,
+        { contextoProva },
       );
 
       aplicar(resultado.classificacoes);
 
+      const naoCanonicas = resultado.classificacoes.filter((c) => c.canonico === false).length;
       if (resultado.interrompido) {
         setErro(`${resultado.classificacoes.length} de ${itens.length} classificados antes do limite da IA. `
           + 'Clique de novo em alguns minutos para continuar de onde parou — o que já foi feito está salvo.');
       } else if (resultado.falhas.length) {
         setErro(`${resultado.falhas.length} conteúdo(s) não foram classificados. ${resultado.erro || ''}`);
+      } else {
+        const partes = [`${resultado.classificacoes.length} classificados pela IA`];
+        if (cache.aplicadas) partes.push(`${cache.aplicadas} reaproveitados do cache`);
+        if (naoCanonicas) partes.push(`${naoCanonicas} fora da taxonomia (revise)`);
+        setAviso(`${partes.join(', ')}.`);
       }
     } catch (error) {
       setErro(error.message);
@@ -361,7 +409,9 @@ export default function AnalisarProva() {
     <div>
       <h2>Montar cronograma a partir de provas</h2>
       <p className="page-description">
-        Envie um ou vários arquivos, escolha exatamente quais questões ou trechos devem entrar e gere um cronograma baseado somente no conteúdo selecionado. A extração acontece no navegador; os PDFs originais não são enviados à IA.
+        Envie um ou vários arquivos, escolha exatamente quais questões ou trechos devem entrar e gere um
+        cronograma baseado somente no conteúdo selecionado. A extração acontece no navegador; os PDFs
+        originais não são enviados à IA.
       </p>
 
       <div className="toolbar responsive-toolbar">
@@ -396,6 +446,7 @@ export default function AnalisarProva() {
 
       {processando && <div className="empty-state">{progresso || 'Processando…'}</div>}
       {erro && <div className="form-error card">{erro}</div>}
+      {aviso && !erro && <div className="card selection-help">{aviso}</div>}
 
       {documentos.length > 0 && (
         <>
@@ -419,7 +470,9 @@ export default function AnalisarProva() {
 
           <div className="document-review-list">
             {documentos.map((doc) => {
-              const escolhidos = doc.questoes.filter((questao) => questao.selecionada !== false && String(questao.paraClassificar || '').trim()).length;
+              const escolhidos = doc.questoes.filter(
+                (questao) => questao.selecionada !== false && String(questao.paraClassificar || '').trim()
+              ).length;
               return (
                 <article className={`card document-review${doc.selecionado === false ? ' is-disabled' : ''}`} key={doc.hash}>
                   <div className="document-review-header">
@@ -435,11 +488,13 @@ export default function AnalisarProva() {
                         <small>{tamanho(doc.tamanho)} · {doc.totalPaginas} pág. · {escolhidos}/{doc.questoes.length} conteúdo(s)</small>
                       </span>
                     </label>
-                    <button className="btn btn-danger-text" type="button" onClick={() => removerDocumento(doc.hash)}>Remover arquivo</button>
+                    <button className="btn btn-danger-text" type="button" onClick={() => removerDocumento(doc.hash)}>
+                      Remover arquivo
+                    </button>
                   </div>
 
                   {doc.erro && <span className="form-error">{doc.erro}</span>}
-                  {doc.avisos?.map((aviso) => <small className="document-warning" key={aviso}>{aviso}</small>)}
+                  {doc.avisos?.map((texto) => <small className="document-warning" key={texto}>{texto}</small>)}
 
                   {!doc.erro && (
                     <details className="content-review" open={documentos.length === 1}>
@@ -451,38 +506,49 @@ export default function AnalisarProva() {
                       </div>
 
                       <div className="content-items">
-                        {doc.questoes.map((item, indice) => (
-                          <div className={`content-item${item.selecionada === false ? ' is-disabled' : ''}`} key={item.id}>
-                            <div className="content-item-header">
-                              <label className="selection-label">
-                                <input
-                                  type="checkbox"
-                                  checked={item.selecionada !== false}
-                                  onChange={(event) => selecionarConteudo(doc.hash, item.id, event.target.checked)}
-                                />
-                                <strong>{rotuloConteudo(item, indice)}</strong>
-                              </label>
-                              <div className="content-badges">
-                                {item.pagina && <span>Página {item.pagina}</span>}
-                                {item.classificacao && (
-                                  <span>
-                                    {item.classificacao.materia_nome} · {item.classificacao.assunto_nome}
-                                    {item.classificacao.origem === 'cabecalho_de_area' ? ' · do caderno' : ''}
-                                  </span>
-                                )}
-                                {item.origem === 'conteudo_adicionado' && (
-                                  <button className="text-button" type="button" onClick={() => removerConteudo(doc.hash, item.id)}>Excluir</button>
-                                )}
+                        {doc.questoes.map((item, indice) => {
+                          const conf = Number(item.classificacao?.confianca);
+                          const duvidoso = item.classificacao && conf < 0.6;
+                          return (
+                            <div className={`content-item${item.selecionada === false ? ' is-disabled' : ''}`} key={item.id}>
+                              <div className="content-item-header">
+                                <label className="selection-label">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.selecionada !== false}
+                                    onChange={(event) => selecionarConteudo(doc.hash, item.id, event.target.checked)}
+                                  />
+                                  <strong>{rotuloConteudo(item, indice)}</strong>
+                                </label>
+                                <div className="content-badges">
+                                  {item.pagina && <span>Página {item.pagina}</span>}
+                                  {item.dependeDeVisual && <span>depende de figura</span>}
+                                  {item.materiaConhecida && !item.classificacao && (
+                                    <span>{item.materiaConhecida} · do caderno</span>
+                                  )}
+                                  {item.classificacao && (
+                                    <span style={duvidoso ? { color: '#F85149' } : undefined}>
+                                      {item.classificacao.materia_nome} — {item.classificacao.assunto_nome}
+                                      {item.classificacao.origem === 'cache' ? ' · cache' : ''}
+                                      {duvidoso ? ` · confiança ${conf.toFixed(2)}, revise` : ''}
+                                    </span>
+                                  )}
+                                  {item.origem === 'conteudo_adicionado' && (
+                                    <button className="text-button" type="button" onClick={() => removerConteudo(doc.hash, item.id)}>
+                                      Excluir
+                                    </button>
+                                  )}
+                                </div>
                               </div>
+                              <textarea
+                                rows="5"
+                                value={item.paraClassificar || ''}
+                                placeholder="Informe ou ajuste o conteúdo que deverá ser considerado no cronograma."
+                                onChange={(event) => atualizarConteudo(doc.hash, item.id, event.target.value)}
+                              />
                             </div>
-                            <textarea
-                              rows="5"
-                              value={item.paraClassificar || ''}
-                              placeholder="Informe ou ajuste o conteúdo que deverá ser considerado no cronograma."
-                              onChange={(event) => atualizarConteudo(doc.hash, item.id, event.target.value)}
-                            />
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </details>
                   )}
@@ -492,10 +558,10 @@ export default function AnalisarProva() {
           </div>
 
           <div className="button-row wrap">
-            <button className="btn btn-primary" onClick={classificar} disabled={processando || !semClassificacao}>
+            <button className="btn btn-primary" onClick={classificar} disabled={processando || !selecao.conteudos}>
               {semClassificacao
-                ? `Classificar ${semClassificacao} conteúdo(s) com IA`
-                : 'Tudo já classificado'}
+                ? `Classificar ${semClassificacao} conteúdo(s)`
+                : 'Reconferir classificações'}
             </button>
             <button className="btn" onClick={salvar} disabled={processando || !selecao.conteudos}>
               Salvar conteúdos selecionados
@@ -505,15 +571,23 @@ export default function AnalisarProva() {
 
           {semClassificacao > 0 && (
             <p className="selection-help">
-              {semClassificacao} conteúdo(s) ainda sem matéria. Você pode salvar e gerar o cronograma
-              assim mesmo — eles entram agrupados como não classificados, e o cronograma sai mais grosseiro.
+              {semClassificacao} conteúdo(s) ainda sem matéria. Você pode salvar e gerar o cronograma assim
+              mesmo — eles entram agrupados como não classificados, e o cronograma sai mais grosseiro.
+            </p>
+          )}
+          {baixaConfianca > 0 && (
+            <p className="selection-help">
+              {baixaConfianca} classificação(ões) com confiança abaixo de 0,6, marcadas em vermelho na lista.
+              Costumam ser questões que dependem de figura — vale conferir antes de salvar.
             </p>
           )}
 
           {frequencias.length > 0 && (
             <div className="card table-scroll">
               <table className="data-table">
-                <thead><tr><th>Matéria</th><th>Assunto</th><th>Arquivos</th><th>Conteúdos</th><th>Frequência</th></tr></thead>
+                <thead>
+                  <tr><th>Matéria</th><th>Assunto</th><th>Arquivos</th><th>Conteúdos</th><th>Frequência</th></tr>
+                </thead>
                 <tbody>
                   {frequencias.map((item) => (
                     <tr key={`${item.materia}-${item.assunto}`}>
@@ -528,28 +602,29 @@ export default function AnalisarProva() {
               </table>
             </div>
           )}
+
+          {frequencias.length > 0 && (
+            <PlanejarCronogramaPanel
+              documentosSelecionados={documentosSelecionados}
+              frequencias={frequencias}
+              materias={materias}
+              nomeSugerido={nome}
+            />
+          )}
         </>
-      )}
-      {frequencias.length > 0 && (
-        <PlanejarCronogramaPanel
-          documentosSelecionados={documentosSelecionados}
-          frequencias={frequencias}
-          materias={materias}
-          nomeSugerido={nome}
-        />
       )}
 
       {analiseId && (
         <div className="card schedule-generator">
-          <h3>Gerar cronograma com a seleção salva</h3>
-          <p>Os assuntos recorrentes nos arquivos e conteúdos escolhidos receberão prioridade maior.</p>
+          <h3>Cronograma simples com a seleção salva</h3>
+          <p>Distribui os assuntos por prioridade, sem IA e sem revisão espaçada.</p>
           <div className="responsive-form-row">
             <label>Início<input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} /></label>
             <label>Fim<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
             <label>Horas/dia<input type="number" min="0.5" step="0.5" value={horas} onChange={(event) => setHoras(event.target.value)} /></label>
           </div>
-          <button className="btn btn-primary" disabled={!dataInicio || !dataFinal || processando} onClick={gerarCronograma}>
-            Criar cronograma automático
+          <button className="btn" disabled={!dataInicio || !dataFinal || processando} onClick={gerarCronograma}>
+            Criar cronograma simples
           </button>
           {!dataFinal && <p className="selection-help">Informe a data final para liberar a geração.</p>}
         </div>

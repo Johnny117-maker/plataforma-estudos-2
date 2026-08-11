@@ -1,18 +1,22 @@
 import { supabase } from '../supabaseClient';
-import { taxonomiaParaPrompt } from './taxonomiaFatec';
+import { taxonomiaParaPrompt, normalizarPar } from './taxonomiaFatec';
 
 // O limite que derruba a classificação não é requisições por minuto, é TOKENS
-// por minuto. No free tier do Groq o teto costuma ser ~6.000 TPM: um único
-// lote de 5 questões com 2.500 caracteres cada já passa disso sozinho.
+// por minuto. No free tier do Groq o teto costuma ser ~6.000 TPM: um único lote
+// de 5 questões com 2.500 caracteres cada já passava disso sozinho — era a
+// causa do 429 em cascata.
 //
-// Então aqui o lote é montado por ORÇAMENTO DE TOKENS, não por contagem de
-// itens, e existe um acelerador de janela móvel que segura a chamada antes de
-// estourar em vez de esperar o 429 chegar.
+// Aqui o lote é montado por ORÇAMENTO DE TOKENS, não por contagem de itens, e
+// existe um acelerador de janela móvel que segura a chamada ANTES de estourar,
+// em vez de reagir ao 429 depois que ele chega.
+//
+// Confira seus limites reais em console.groq.com -> Settings -> Limits e
+// ajuste TETO_TPM para ~60% do valor de lá.
 
-const TETO_TPM = 2500;            // margem sob os 6.000 do free tier
-const TOKENS_POR_LOTE = 900;     // texto das questões por requisição
-const MAX_ITENS_LOTE = 4;         // teto da Edge Function é 8
-const MAX_CHARS_QUESTAO = 1100;   // classificar não precisa do enunciado inteiro
+const TETO_TPM = 2_500;
+const TOKENS_POR_LOTE = 900;
+const MAX_ITENS_LOTE = 4;          // o teto da Edge Function é 8
+const MAX_CHARS_QUESTAO = 1_100;   // classificar não precisa do enunciado inteiro
 const MAX_TENTATIVAS = 5;
 const ESPERA_MAXIMA_MS = 70_000;
 
@@ -25,26 +29,24 @@ function estimarTokens(texto) {
   return Math.ceil(String(texto || '').length / 3.5);
 }
 
-// Janela móvel de 60s. Antes de cada chamada, se o previsto estourar o teto,
-// dorme até a janela liberar espaço.
+// Janela móvel de 60s.
 const janela = [];
 
 function tokensNaJanela() {
   const corte = Date.now() - 60_000;
   while (janela.length && janela[0].em < corte) janela.shift();
-  return janela.reduce((s, r) => s + r.tokens, 0);
+  return janela.reduce((soma, registro) => soma + registro.tokens, 0);
 }
 
 async function reservarTokens(tokens, onEspera) {
   for (;;) {
-    const usados = tokensNaJanela();
-    if (usados + tokens <= TETO_TPM) {
+    if (tokensNaJanela() + tokens <= TETO_TPM) {
       janela.push({ em: Date.now(), tokens });
       return;
     }
     const maisAntigo = janela[0];
     const faltam = Math.max(1_000, 60_000 - (Date.now() - maisAntigo.em) + 250);
-    onEspera?.(Math.ceil(faltam / 1000));
+    onEspera?.(Math.ceil(faltam / 1_000));
     await esperar(Math.min(faltam, 61_000));
   }
 }
@@ -75,19 +77,18 @@ async function invocarIA(body, { tentativa = 0, onEspera } = {}) {
     const limite = detalhe.status === 429 || /limite|429|rate/i.test(detalhe.mensagem);
 
     if (limite && tentativa < MAX_TENTATIVAS) {
-      // Backoff exponencial com o Retry-After do provedor como piso.
       const base = detalhe.retryAfterMs || 8_000 * 2 ** tentativa;
       const espera = Math.min(ESPERA_MAXIMA_MS, Math.max(2_000, base));
-      onEspera?.(Math.ceil(espera / 1000));
-      // O 429 significa que a janela local estava otimista: zera para recomeçar
-      // a contagem a partir de agora.
+      onEspera?.(Math.ceil(espera / 1_000));
+      // O 429 prova que a janela local estava otimista: zera e recomeça a
+      // contagem a partir de agora.
       janela.length = 0;
       await esperar(espera);
       return invocarIA(body, { tentativa: tentativa + 1, onEspera });
     }
 
     const erro = new Error(limite
-      ? 'O limite de uso da IA continua ativo depois de várias tentativas. Aguarde um minuto e continue de onde parou.'
+      ? 'O limite de uso da IA continua ativo depois de várias tentativas. Aguarde um minuto e clique de novo para continuar de onde parou.'
       : detalhe.mensagem);
     erro.limite = limite;
     throw erro;
@@ -101,8 +102,8 @@ export function perguntarIAJson(prompt, system, maxTokens) {
   return invocarIA({ acao: 'gerar_json', prompt, system, maxTokens });
 }
 
-// Monta lotes por orçamento de tokens. Uma questão gigante vai sozinha; várias
-// curtas viajam juntas.
+// Lotes por orçamento de tokens: uma questão longa viaja sozinha, várias curtas
+// viajam juntas.
 function montarLotes(questoes) {
   const lotes = [];
   let atual = [];
@@ -122,55 +123,71 @@ function montarLotes(questoes) {
   return lotes;
 }
 
-// O catálogo viaja em toda requisição. Enviar 9 matérias com 50 assuntos cada
-// custa mais tokens que as próprias questões — aqui ele é enxugado.
-function enxugarCatalogo(materias, limiteAssuntos = 40) {
-  return materias.slice(0, 20).map((m) => ({
-    id: m.id,
-    nome: m.nome,
-    assuntos: (m.subgeneros || []).slice(0, limiteAssuntos).map((s) => ({ id: s.id, nome: s.nome })),
+// O catálogo viaja em toda requisição. Nove matérias com 50 assuntos cada
+// custavam mais tokens que as próprias questões.
+function enxugarCatalogo(materias, limiteAssuntos = 30) {
+  return materias.slice(0, 20).map((materia) => ({
+    id: materia.id,
+    nome: materia.nome,
+    assuntos: (materia.subgeneros || []).slice(0, limiteAssuntos).map((s) => ({ id: s.id, nome: s.nome })),
   }));
+}
+
+/**
+ * Encaixa o que a IA devolveu na taxonomia canônica.
+ *
+ * Sem isso, "Estequiometria" e "Estequiometria e mol" viram dois assuntos
+ * distintos e a recorrência entre provas — que é o produto inteiro — se dilui
+ * exatamente onde deveria acumular.
+ */
+function normalizarClassificacoes(classificacoes) {
+  return classificacoes.map((item) => {
+    const par = normalizarPar(item.materia_nome, item.assunto_nome);
+    return {
+      ...item,
+      materia_nome: par.materia,
+      assunto_nome: par.assunto,
+      canonico: par.canonico,
+      origem: 'ia',
+      // Par que não encaixou na taxonomia não merece a confiança declarada: ou
+      // o conteúdo é novo, ou o modelo inventou um nome.
+      confianca: par.canonico
+        ? (Number(item.confianca) || 0.7)
+        : Math.min(Number(item.confianca) || 0.5, 0.4),
+    };
+  });
 }
 
 /**
  * Classifica em lotes, respeitando o orçamento de tokens.
  *
- * Diferença central em relação à versão anterior: um lote que falha NÃO derruba
- * os anteriores. O que já foi classificado é entregue via onParcial e devolvido
- * no retorno, então dá para salvar o que deu certo e reprocessar só o resto.
+ * Um lote que falha NÃO derruba os anteriores: o que já foi classificado é
+ * entregue via onParcial e devolvido no retorno, então dá para salvar o que
+ * deu certo e reprocessar só o resto. Como classificar() só envia o que ainda
+ * não tem classificação, clicar de novo continua de onde parou.
  *
  * onProgresso(atual, total, mensagem)
  * onParcial(classificacoesAteAgora)
  *
  * Devolve { classificacoes, falhas, interrompido, erro }.
  */
-export async function classificarQuestoesIA(questoes, materias = [], onProgresso, onParcial) {
+export async function classificarQuestoesIA(questoes, materias = [], onProgresso, onParcial, opcoes = {}) {
+  const { contextoProva = null } = opcoes;
   const lotes = montarLotes(questoes);
   const catalogo = enxugarCatalogo(materias);
-  const custoCatalogo = estimarTokens(JSON.stringify(catalogo));
-  
+  const taxonomia = taxonomiaParaPrompt();
+  const custoFixo = estimarTokens(JSON.stringify(catalogo)) + estimarTokens(taxonomia);
 
   const classificacoes = [];
   const falhas = [];
   let interrompido = false;
   let erroFinal = null;
 
-  const resposta = await invocarIA({
-  acao: 'classificar_questoes',
-  materias: catalogo,
-  taxonomia: taxonomiaParaPrompt(),
-  contextoProva: contexto || null,
-  questoes: lote.map((q) => ({
-    id: q.id,
-    texto: q._texto,
-    topico: q.topico,
-    materiaConhecida: q.materiaConhecida || null,
-    dependeDeVisual: q.dependeDeVisual || false,
-  })),
-
   for (let i = 0; i < lotes.length; i += 1) {
     const lote = lotes[i];
-    const previsto = custoCatalogo + lote.reduce((s, q) => s + q._tokens, 0) + 500 + lote.length * 220;
+    const previsto = custoFixo
+      + lote.reduce((soma, q) => soma + q._tokens, 0)
+      + 300 + lote.length * 160;
 
     await reservarTokens(previsto, (segundos) => {
       onProgresso?.(i + 1, lotes.length, `Aguardando ${segundos}s para não estourar o limite da IA…`);
@@ -182,19 +199,27 @@ export async function classificarQuestoesIA(questoes, materias = [], onProgresso
       const resposta = await invocarIA({
         acao: 'classificar_questoes',
         materias: catalogo,
-        questoes: lote.map((q) => ({ id: q.id, texto: q._texto, topico: q.topico })),
+        taxonomia,
+        contextoProva,
+        questoes: lote.map((questao) => ({
+          id: questao.id,
+          texto: questao._texto,
+          topico: questao.topico || null,
+          materiaConhecida: questao.materiaConhecida || null,
+          dependeDeVisual: Boolean(questao.dependeDeVisual),
+        })),
       }, {
         onEspera: (segundos) => onProgresso?.(i + 1, lotes.length,
           `Limite da IA atingido. Nova tentativa em ${segundos}s…`),
       });
 
       if (!Array.isArray(resposta?.classificacoes)) throw new Error('Formato de classificação inválido.');
-      classificacoes.push(...resposta.classificacoes);
+      classificacoes.push(...normalizarClassificacoes(resposta.classificacoes));
       onParcial?.(classificacoes.slice());
     } catch (error) {
-      falhas.push(...lote.map((q) => q.id));
+      falhas.push(...lote.map((questao) => questao.id));
       // Rate limit persistente derruba tudo que vier depois: para e entrega o
-      // que já foi feito, em vez de queimar o resto das tentativas à toa.
+      // que já foi feito, em vez de queimar as tentativas restantes à toa.
       if (error.limite) {
         interrompido = true;
         erroFinal = error.message;

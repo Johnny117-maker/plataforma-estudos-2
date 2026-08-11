@@ -53,9 +53,10 @@ export default function Cronogramas() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Cronogramas</h2>
-        <button className="btn btn-primary" onClick={() => setShowForm((v) => !v)}>
-          {showForm ? 'Cancelar' : '+ Novo cronograma'}
-        </button>
+        <div className="button-row">
+          <button className="btn btn-primary" onClick={() => navigate('/cronogramas/novo-adaptativo')}>+ Novo adaptativo</button>
+          <button className="btn" onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancelar' : 'Novo simples'}</button>
+        </div>
       </div>
 
       {showForm && (

@@ -14,6 +14,7 @@ const Perguntas = lazy(() => import('./pages/Perguntas.jsx'));
 const DatasImportantes = lazy(() => import('./pages/DatasImportantes.jsx'));
 const CriarCronogramaIA = lazy(() => import('./pages/CriarCronogramaIA.jsx'));
 const AnalisarProva = lazy(() => import('./pages/AnalisarProva.jsx'));
+const CriarCronogramaAdaptativo = lazy(() => import('./pages/CriarCronogramaAdaptativo.jsx'));
 
 function Loading() { return <div className="empty-state">Carregando…</div>; }
 
@@ -34,6 +35,7 @@ export default function App() {
           <Route path="/cronogramas/:id" element={<CronogramaDetail />} />
           <Route path="/datas" element={<DatasImportantes />} />
           <Route path="/ia/novo-cronograma" element={<CriarCronogramaIA />} />
+          <Route path="/cronogramas/novo-adaptativo" element={<CriarCronogramaAdaptativo />} />
           <Route path="/provas" element={<AnalisarProva />} />
           <Route path="/notas" element={<Notas />} />
           <Route path="/tarefas" element={<Tarefas />} />

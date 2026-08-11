@@ -10,16 +10,19 @@ Esta versão inclui:
 - cronogramas em lista, Kanban, calendário e timeline;
 - criação, importação, duplicação e reorganização atômicas;
 - perguntas de múltipla escolha, verdadeiro/falso e dissertativas;
-- upload simultâneo de até 20 provas PDF, DOCX, TXT, Markdown ou imagem;
-- extração local, OCR/leitura visual seletiva, classificação híbrida em lotes e cruzamento de assuntos;
+- upload simultâneo de até 20 provas PDF, DOCX, TXT ou Markdown;
+- extração local, seleção por arquivo e por conteúdo, classificação em lotes por IA e cruzamento de assuntos;
 - combinação de questões, trechos extraídos e conteúdos complementares de uma ou várias provas;
 - persistência de documentos, questões classificadas e frequências;
 - geração automática de cronograma com prioridade baseada na recorrência;
+- gerador adaptativo em cinco etapas, com disponibilidade por dia, meta de acertos e prévia;
+- fases proporcionais ao prazo, margem de 15%, revisões D+1/D+7/D+30, redações e simulados;
+- registro de desempenho, revisão extra D+2 e reorganização semanal sem mover tarefas fixas;
+- Groq com alternância entre Llama e GPT-OSS, mais Gemini para OCR e conteúdo visual;
 - notas hierárquicas em blocos;
 - RLS, integridade multiusuário, testes, lint, CI e carregamento por rota.
 
-PDFs digitalizados e imagens usam OCR nativo do Gemini. PDFs com texto permanecem no navegador e somente
-questões que citam gráfico, tabela, mapa ou figura são enviadas para leitura visual.
+PDFs compostos por imagens são encaminhados ao Gemini para OCR; gráficos, tabelas e figuras também podem ser descritos pelo modelo visual.
 
 ## Arquitetura
 
@@ -30,12 +33,11 @@ flowchart TD
   SDK --> DB[PostgreSQL + RLS + RPCs]
   SDK --> EDGE[Edge Function IA]
   EDGE --> GROQ[Groq: Llama + GPT-OSS]
-  EDGE --> GEMINI[Gemini: OCR e visão]
+  EDGE --> GEMINI[Gemini visual e OCR]
 ```
 
 - O navegador extrai e segmenta os documentos.
-- A Edge Function alterna lotes entre os modelos da Groq e mantém as chaves privadas no servidor.
-- O Gemini recebe somente arquivos que precisam de OCR ou interpretação visual; o arquivo temporário é removido após a resposta.
+- A Edge Function recebe lotes pequenos e mantém a chave da Groq no servidor.
 - Operações com várias inserções são executadas por funções PostgreSQL transacionais.
 - O frontend nunca escolhe o `user_id` usado pelas RPCs; ele é obtido de `auth.uid()`.
 
@@ -45,7 +47,7 @@ flowchart TD
 - npm 10+
 - projeto Supabase
 - Supabase CLI para aplicar migrações e publicar a função
-- chaves gratuitas da Groq e do Google AI Studio para as funções de IA
+- chaves gratuitas da Groq e do Gemini para classificação, OCR e análise visual
 
 ## Instalação
 
@@ -61,7 +63,7 @@ VITE_SUPABASE_URL=https://SEU_PROJETO.supabase.co
 VITE_SUPABASE_ANON_KEY=SUA_CHAVE_ANON_PUBLIC
 ```
 
-Nunca coloque `service_role`, `GROQ_API_KEY`, `GEMINI_API_KEY` ou qualquer chave privada no `.env` do frontend.
+Nunca coloque `service_role`, `GROQ_API_KEY` ou qualquer chave privada no `.env` do frontend.
 
 ## Banco de dados
 
@@ -76,6 +78,9 @@ As migrações são executadas em ordem:
 
 1. `202608100001_schema_hardened.sql`: tabelas, migração dos campos antigos, constraints, chaves, índices, triggers, RLS e views seguras.
 2. `202608100002_transactional_rpcs.sql`: funções transacionais usadas pelo frontend.
+3. `202608110001_cronograma_sem_ia.sql`: fallback quando a classificação ainda não terminou.
+4. `202608110002_cache_classificacao.sql`: cache por hash das questões.
+5. `202608110003_cronograma_adaptativo.sql`: disponibilidade, prioridades, desempenho, revisões e RPCs adaptativas.
 
 O primeiro arquivo copia `data_alvo` para `data_final` e `ritmo_horas_dia` para `horas_por_dia` antes de remover as colunas antigas. Se encontrar relações pertencentes a usuários diferentes, a migração para com uma mensagem em vez de alterar silenciosamente os dados.
 
@@ -86,17 +91,12 @@ Consulte [docs/SUPABASE.md](docs/SUPABASE.md) antes de aplicar em produção.
 Configure os segredos e publique:
 
 ```bash
-supabase secrets set GROQ_API_KEY=SUA_CHAVE
-supabase secrets set GEMINI_API_KEY=SUA_CHAVE
-supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant
-supabase secrets set GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b
-supabase secrets set GEMINI_MODEL=gemini-3.5-flash-lite
-supabase secrets set ALLOWED_ORIGINS=https://seu-dominio.com
+supabase secrets set GROQ_API_KEY="SUA_CHAVE_GROQ"
+supabase secrets set GEMINI_API_KEY="SUA_CHAVE_GEMINI"
+supabase secrets set GROQ_LLAMA_MODEL="llama-3.1-8b-instant" GROQ_GPT_OSS_MODEL="openai/gpt-oss-20b" GEMINI_MODEL="gemini-3.5-flash-lite"
+supabase secrets set ALLOWED_ORIGINS="http://localhost:5173,https://seu-dominio.com"
 supabase functions deploy ia
 ```
-
-`llama-3.1-8b-instant` está programado para ser desativado pela Groq em 16/08/2026. O código já tenta
-`openai/gpt-oss-20b` automaticamente quando o Llama falha, portanto a aplicação continua funcionando.
 
 `ALLOWED_ORIGINS` aceita uma lista separada por vírgulas. A verificação JWT permanece habilitada.
 
@@ -126,7 +126,9 @@ npm run check
 7. Clique em **Classificar seleção com IA**.
 8. Confira a tabela cruzada de matéria, assunto, arquivos e frequência.
 9. Clique em **Salvar conteúdos selecionados**.
-10. Informe início, fim e horas por dia para gerar o cronograma.
+10. Preencha o assistente: objetivo, disponibilidade e diagnóstico.
+11. Confira as quatro fases, revisões, simulados, carga e dias livres na prévia.
+12. Confirme para salvar tudo em uma única transação.
 
 Quando a numeração das questões não é reconhecida, o texto é dividido automaticamente em trechos selecionáveis de até 3.000 caracteres. Somente os arquivos e conteúdos escolhidos são enviados para classificação e persistidos na análise; conteúdos desmarcados não influenciam a frequência nem o cronograma.
 
@@ -134,7 +136,7 @@ O peso usado na priorização combina quantidade de questões e presença em doc
 
 ## Segurança
 
-- Todas as 13 tabelas de usuário usam RLS forçado.
+- Todas as 18 tabelas de usuário usam RLS forçado.
 - As views utilizam `security_invoker=true`.
 - Relações obrigatórias usam chaves compostas com `user_id`.
 - Relações opcionais são verificadas por trigger.
@@ -163,7 +165,7 @@ O `base` do Vite está configurado como `/plataforma-estudos/`. Ajuste `vite.con
 
 ## Limitações conhecidas
 
+- OCR e análise visual dependem da cota gratuita configurada no Gemini.
 - A classificação depende da disponibilidade e da cota do provedor de IA.
-- Se a cota gratuita do Gemini acabar, PDFs com texto continuam funcionando; PDFs escaneados ficam pendentes até a cota voltar.
-- A leitura visual é uma interpretação automática e deve ser revisada quando a classificação vier com confiança baixa.
+- Questões que dependem de imagens, gráficos ou tabelas são marcadas para revisão humana.
 - A migração precisa ser validada em um projeto Supabase de homologação antes de ser aplicada ao banco principal.

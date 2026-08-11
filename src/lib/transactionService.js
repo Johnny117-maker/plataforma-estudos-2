@@ -30,3 +30,28 @@ export function gerarCronogramaDaAnalise(analiseId, dataInicio, dataFinal, horas
     p_horas_por_dia: horasPorDia,
   });
 }
+
+export function criarCronogramaAdaptativo(payload) {
+  return rpc('criar_cronograma_adaptativo', { p_payload: payload });
+}
+
+export function registrarDesempenhoTarefa(tarefaId, desempenho) {
+  return rpc('registrar_desempenho_tarefa', {
+    p_tarefa_id: tarefaId,
+    p_tempo_realizado_minutos: desempenho.tempo_realizado_minutos ?? null,
+    p_questoes_realizadas: desempenho.questoes_realizadas ?? 0,
+    p_acertos: desempenho.acertos ?? 0,
+    p_nivel_confianca: desempenho.nivel_confianca ?? null,
+    p_dificuldade_percebida: desempenho.dificuldade_percebida ?? null,
+    p_energia: desempenho.energia ?? null,
+    p_observacoes: desempenho.observacoes || null,
+  });
+}
+
+export function aplicarReorganizacaoAdaptativa(cronogramaId, atualizacoes, resumo = {}) {
+  return rpc('aplicar_reorganizacao_adaptativa', {
+    p_cronograma_id: cronogramaId,
+    p_atualizacoes: atualizacoes,
+    p_resumo: resumo,
+  });
+}

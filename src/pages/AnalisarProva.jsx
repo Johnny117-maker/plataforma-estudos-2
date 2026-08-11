@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { criarLinhasDeTexto, extrairDeArquivo } from '../lib/extrairTexto';
 import {
@@ -18,7 +17,7 @@ import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
 import { aplicarCache } from '../lib/cacheClassificacao';
 import { aplicarDescricoesVisuais } from '../lib/documentoVisual';
-import { gerarCronogramaDaAnalise, salvarAnaliseProvas } from '../lib/transactionService';
+import { salvarAnaliseProvas } from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
 const MAX_ARQUIVOS = 20;
@@ -29,7 +28,6 @@ async function sha256(file) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function hoje() { return new Date().toISOString().slice(0, 10); }
 function tamanho(bytes) {
   return bytes < 1048576 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
 }
@@ -76,7 +74,6 @@ function rotuloConteudo(item, indice) {
 
 export default function AnalisarProva() {
   const inputRef = useRef(null);
-  const navigate = useNavigate();
   const [perfil, setPerfil] = useState('auto');
   const [documentos, setDocumentos] = useState([]);
   const [materias, setMaterias] = useState([]);
@@ -86,9 +83,6 @@ export default function AnalisarProva() {
   const [aviso, setAviso] = useState('');
   const [analiseId, setAnaliseId] = useState(null);
   const [nome, setNome] = useState('Análise comparativa de provas');
-  const [dataInicio, setDataInicio] = useState(hoje());
-  const [dataFinal, setDataFinal] = useState('');
-  const [horas, setHoras] = useState('2');
 
   useEffect(() => {
     supabase
@@ -448,24 +442,6 @@ export default function AnalisarProva() {
     }
   }
 
-  async function gerarCronograma() {
-    setErro('');
-    if (!dataInicio || !dataFinal) {
-      setErro('Informe a data de início e a data final antes de gerar.');
-      return;
-    }
-    setProcessando(true);
-    setProgresso('Gerando cronograma com os conteúdos selecionados…');
-    try {
-      const cronogramaId = await gerarCronogramaDaAnalise(analiseId, dataInicio, dataFinal, Number(horas));
-      navigate(`/cronogramas/${cronogramaId}`);
-    } catch (error) {
-      setErro(error.message);
-      setProcessando(false);
-      setProgresso('');
-    }
-  }
-
   function exportar() {
     const blob = new Blob([
       JSON.stringify({ nome, documentos: serializarDocumentos(documentosSelecionados), frequencias }, null, 2),
@@ -679,30 +655,17 @@ export default function AnalisarProva() {
 
           {frequencias.length > 0 && (
             <PlanejarCronogramaPanel
+              key={frequencias.map((item) => `${item.materia}:${item.assunto}:${item.questoes}`).join('|')}
               documentosSelecionados={documentosSelecionados}
               frequencias={frequencias}
               materias={materias}
               nomeSugerido={nome}
+              analiseId={analiseId}
             />
           )}
         </>
       )}
 
-      {analiseId && (
-        <div className="card schedule-generator">
-          <h3>Cronograma simples com a seleção salva</h3>
-          <p>Distribui os assuntos por prioridade, sem IA e sem revisão espaçada.</p>
-          <div className="responsive-form-row">
-            <label>Início<input type="date" value={dataInicio} onChange={(event) => setDataInicio(event.target.value)} /></label>
-            <label>Fim<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
-            <label>Horas/dia<input type="number" min="0.5" step="0.5" value={horas} onChange={(event) => setHoras(event.target.value)} /></label>
-          </div>
-          <button className="btn" disabled={!dataInicio || !dataFinal || processando} onClick={gerarCronograma}>
-            Criar cronograma simples
-          </button>
-          {!dataFinal && <p className="selection-help">Informe a data final para liberar a geração.</p>}
-        </div>
-      )}
     </div>
   );
 }

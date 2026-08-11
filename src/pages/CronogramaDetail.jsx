@@ -13,13 +13,18 @@ import DuplicarCronogramaModal from '../components/DuplicarCronogramaModal.jsx';
 import RenomearCronogramaModal from '../components/RenomearCronogramaModal.jsx';
 import DayModal from '../components/DayModal.jsx';
 import ReorganizarIAModal from '../components/ReorganizarIAModal.jsx';
+import ReorganizarAdaptativoModal from '../components/ReorganizarAdaptativoModal.jsx';
+import RegistrarDesempenhoModal from '../components/RegistrarDesempenhoModal.jsx';
+import AdaptiveDashboard from '../components/AdaptiveDashboard.jsx';
 import ConfigurarCronogramaModal from '../components/ConfigurarCronogramaModal.jsx';
 
 const ABAS = [
+  { key: 'hoje', label: 'Hoje' },
   { key: 'lista', label: 'Lista' },
   { key: 'kanban', label: 'Kanban' },
   { key: 'calendario', label: 'Calendário' },
   { key: 'timeline', label: 'Timeline' },
+  { key: 'desempenho', label: 'Desempenho' },
 ];
 
 const CATEGORIA_LABEL = {
@@ -46,6 +51,9 @@ export default function CronogramaDetail() {
   const [tarefas, setTarefas] = useState([]);
   const [materias, setMaterias] = useState([]);
   const [datasImportantes, setDatasImportantes] = useState([]);
+  const [desempenhos, setDesempenhos] = useState([]);
+  const [revisoes, setRevisoes] = useState([]);
+  const [disponibilidade, setDisponibilidade] = useState([]);
   const [aba, setAba] = useState('lista');
   const [loading, setLoading] = useState(true);
   const [modalTarefa, setModalTarefa] = useState(undefined); // undefined = fechado, null = nova, objeto = editar
@@ -55,6 +63,7 @@ export default function CronogramaDetail() {
   const [modalRenomear, setModalRenomear] = useState(false);
   const [modalReorganizarIA, setModalReorganizarIA] = useState(false);
   const [modalConfigurar, setModalConfigurar] = useState(false);
+  const [modalDesempenho, setModalDesempenho] = useState(null);
   const [filtroMateria, setFiltroMateria] = useState('');
   const [filtroFase, setFiltroFase] = useState('');
   const [mostrarFases, setMostrarFases] = useState(false);
@@ -81,6 +90,17 @@ export default function CronogramaDetail() {
     setTarefas(tData || []);
     setMaterias(mData || []);
     setDatasImportantes(dData || []);
+    const tarefaIds = (tData || []).map((tarefa) => tarefa.id);
+    const [{ data: desempenhoData }, { data: revisaoData }, { data: disponibilidadeData }] = await Promise.all([
+      tarefaIds.length
+        ? supabase.from('desempenho_tarefas').select('*').in('tarefa_id', tarefaIds).order('concluida_em', { ascending: false })
+        : Promise.resolve({ data: [] }),
+      supabase.from('revisoes').select('*').eq('cronograma_id', id).order('data_prevista', { ascending: true }),
+      supabase.from('cronograma_disponibilidade').select('*').eq('cronograma_id', id).order('dia_semana', { ascending: true }),
+    ]);
+    setDesempenhos(desempenhoData || []);
+    setRevisoes(revisaoData || []);
+    setDisponibilidade(disponibilidadeData || []);
     setLoading(false);
   }, [id]);
 
@@ -173,7 +193,9 @@ export default function CronogramaDetail() {
           <button className="btn btn-primary" onClick={() => abrirNovaTarefa()}>+ Nova tarefa</button>
           <button className="btn" onClick={() => abrirNovaData()}>+ Nova data</button>
           <button className="btn" onClick={() => setModalDuplicar(true)}>Duplicar cronograma</button>
-          <button className="btn" onClick={() => setModalReorganizarIA(true)}>Reorganizar com IA</button>
+          <button className="btn" onClick={() => setModalReorganizarIA(true)}>
+            {cronograma.versao_gerador?.startsWith('adaptativo') ? 'Reorganizar cronograma' : 'Reorganizar com IA'}
+          </button>
           <button className="btn" style={{ color: 'var(--danger)' }} onClick={excluirCronograma}>Excluir cronograma</button>
         </div>
       </div>
@@ -257,6 +279,12 @@ export default function CronogramaDetail() {
         ))}
       </div>
 
+      {aba === 'hoje' && (
+        <AdaptiveDashboard
+          modo="hoje" cronograma={cronograma} tarefas={tarefas} desempenhos={desempenhos}
+          revisoes={revisoes} onRegistrar={setModalDesempenho}
+        />
+      )}
       {aba === 'lista' && <ListView tarefas={tarefasFiltradas} fasesById={fasesById} materiasById={materiasById} onEdit={setModalTarefa} />}
       {aba === 'kanban' && <KanbanView tarefas={tarefasFiltradas} fasesById={fasesById} materiasById={materiasById} onEdit={setModalTarefa} onChanged={carregar} />}
       {aba === 'calendario' && (
@@ -272,6 +300,12 @@ export default function CronogramaDetail() {
         />
       )}
       {aba === 'timeline' && <TimelineView fases={fasesFiltradas} datasImportantes={datasImportantes} />}
+      {aba === 'desempenho' && (
+        <AdaptiveDashboard
+          modo="desempenho" cronograma={cronograma} tarefas={tarefas} desempenhos={desempenhos}
+          revisoes={revisoes} onRegistrar={setModalDesempenho}
+        />
+      )}
 
       {diaSelecionado && (
         <DayModal
@@ -340,7 +374,18 @@ export default function CronogramaDetail() {
         />
       )}
 
-      {modalReorganizarIA && (
+      {modalReorganizarIA && cronograma.versao_gerador?.startsWith('adaptativo') && (
+        <ReorganizarAdaptativoModal
+          cronograma={cronograma}
+          tarefas={tarefas}
+          desempenhos={desempenhos}
+          disponibilidade={disponibilidade}
+          onClose={() => setModalReorganizarIA(false)}
+          onAplicado={carregar}
+        />
+      )}
+
+      {modalReorganizarIA && !cronograma.versao_gerador?.startsWith('adaptativo') && (
         <ReorganizarIAModal
           cronograma={cronograma}
           fases={fases}
@@ -350,9 +395,18 @@ export default function CronogramaDetail() {
         />
       )}
 
+      {modalDesempenho && (
+        <RegistrarDesempenhoModal
+          tarefa={modalDesempenho}
+          onClose={() => setModalDesempenho(null)}
+          onSaved={carregar}
+        />
+      )}
+
       {modalConfigurar && (
         <ConfigurarCronogramaModal
           cronograma={cronograma}
+          disponibilidade={disponibilidade}
           onClose={() => setModalConfigurar(false)}
           onSaved={carregar}
         />

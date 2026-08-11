@@ -19,6 +19,7 @@
 - força RLS em todas as tabelas;
 - recria views com `security_invoker`;
 - instala RPCs transacionais.
+- adiciona disponibilidade semanal, prioridades, desempenho, revisões e reorganização adaptativa.
 
 As colunas antigas `data_alvo` e `ritmo_horas_dia` são removidas somente depois da cópia dos valores.
 
@@ -59,6 +60,9 @@ Teste com dois usuários diferentes. Cada usuário deve enxergar somente seus pr
 | `aplicar_reorganizacao_cronograma` | Atualiza ordem e datas sem estado parcial |
 | `salvar_analise_provas` | Salva análise, documentos, questões e frequências |
 | `gerar_cronograma_da_analise` | Gera fases e tarefas priorizadas pela recorrência |
+| `criar_cronograma_adaptativo` | Salva configuração, fases, tarefas e revisões em uma transação |
+| `registrar_desempenho_tarefa` | Conclui a tarefa e cria reforço D+2 abaixo de 60% |
+| `aplicar_reorganizacao_adaptativa` | Move apenas tarefas pendentes e não fixas, guardando histórico |
 
 Todas exigem sessão autenticada e derivam o dono de `auth.uid()`.
 
@@ -67,18 +71,12 @@ Todas exigem sessão autenticada e derivam o dono de `auth.uid()`.
 ```bash
 supabase secrets set GROQ_API_KEY=SUA_CHAVE
 supabase secrets set GEMINI_API_KEY=SUA_CHAVE
-supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant
-supabase secrets set GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b
-supabase secrets set GEMINI_MODEL=gemini-3.5-flash-lite
+supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b GEMINI_MODEL=gemini-3.5-flash-lite
 supabase secrets set ALLOWED_ORIGINS=http://localhost:5173,https://seu-dominio.com
 supabase functions deploy ia
 ```
 
 Não use `--no-verify-jwt`.
-
-As chaves de Groq e Gemini pertencem à Edge Function. Não use prefixo `VITE_` e não as coloque em `.env`,
-GitHub Pages ou código React. `GROQ_MODEL` antigo continua aceito como preferência, mas os nomes separados
-acima permitem fallback automático entre Llama e GPT-OSS.
 
 ## Reversão
 

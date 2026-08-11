@@ -16,6 +16,9 @@ export default function Sidebar() {
       <NavLink to="/ia/novo-cronograma" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
         Criar cronograma com IA
       </NavLink>
+      <NavLink to="/cronogramas/novo-adaptativo" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+        Novo cronograma adaptativo
+      </NavLink>
       <NavLink to="/provas" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
         Analisar Prova
       </NavLink>

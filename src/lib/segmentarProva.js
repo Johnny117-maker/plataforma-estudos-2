@@ -269,13 +269,14 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
 
     return {
       numero: c.numero,
+      indiceLinha: c.indice,
       pagina: linhas[c.indice].pagina,
       ...partes,
       ...minerado,
       apoio,
       caracteres: partes.enunciado.length,
       dependeDeVisual: RE_VISUAL.test(partes.enunciado),
-      // É isto que vai para a IA na etapa 3: nunca o comentário.
+      
       paraClassificar: [apoio.map((s) => s.texto).join('\n'), partes.enunciado]
         .filter(Boolean)
         .join('\n'),

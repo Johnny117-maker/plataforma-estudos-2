@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
+import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 import { extrairDeArquivo } from '../lib/extrairTexto';
 import { classificarQuestoesIA } from '../lib/iaService';
 import {
@@ -11,6 +12,7 @@ import {
   serializarDocumentos,
 } from '../lib/analiseProvas';
 import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
+import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
 import { gerarCronogramaDaAnalise, salvarAnaliseProvas } from '../lib/transactionService';
 
 const MAX_ARQUIVOS = 20;
@@ -73,6 +75,7 @@ export default function AnalisarProva() {
   const selecao = useMemo(() => resumirSelecao(documentos), [documentos]);
   const frequencias = useMemo(() => cruzarFrequencias(documentosSelecionados), [documentosSelecionados]);
   const totalExtraido = documentos.reduce((s, d) => s + d.questoes.length, 0);
+  const semClassificacao = selecao.conteudos - selecao.classificados;
 
   function invalidarAnalise() {
     setAnaliseId(null);
@@ -123,7 +126,12 @@ export default function AnalisarProva() {
           continue;
         }
 
-        const { linhas } = limparLinhas(extracao.linhas);
+        // O rótulo "Questão NN" é desenhado como dois fragmentos separados por
+        // um vão de ~13pt. Quando o corte XY cai nesse vão — acontece em página
+        // de duas colunas — saem duas linhas e a questão some sem erro nenhum.
+        const { linhas: linhasLimpas } = limparLinhas(extracao.linhas);
+        const { linhas, religadas } = religarCabecalhos(linhasLimpas);
+
         const seg = segmentarQuestoes(linhas, perfil);
         const prefixo = hash.slice(0, 12);
         const questoesDetectadas = seg.questoes.map((questao, indice) => ({
@@ -135,9 +143,24 @@ export default function AnalisarProva() {
         const questoes = questoesDetectadas.length
           ? questoesDetectadas
           : criarBlocosDeConteudo(linhas, prefixo);
+
         const avisos = [...seg.avisos];
+        if (religadas) {
+          avisos.push(`${religadas} cabeçalho(s) de questão foram remontados a partir de fragmentos separados.`);
+        }
         if (!questoesDetectadas.length && questoes.length) {
           avisos.push('A numeração não foi reconhecida; o texto foi dividido em trechos selecionáveis.');
+        }
+
+        // Muitos cadernos declaram a matéria de cada bloco ("MULTIDISCIPLINAR",
+        // "QUÍMICA", "HISTÓRIA"...). Onde existe, classifica de graça e com
+        // precisão maior que a da IA. Onde não existe, não faz nada.
+        if (questoesDetectadas.length) {
+          const { porNumero, areas } = mapearAreas(linhas, questoesDetectadas);
+          if (areas.length) {
+            const comArea = aplicarAreas(questoesDetectadas, porNumero, materias);
+            avisos.push(`${comArea} de ${questoesDetectadas.length} questão(ões) classificadas pelos ${areas.length} cabeçalhos de área do caderno, sem usar IA.`);
+          }
         }
 
         saida.push({
@@ -230,17 +253,40 @@ export default function AnalisarProva() {
     setAnaliseId(null);
     setProcessando(true);
     try {
-      const itens = documentosSelecionados.flatMap((doc) => doc.questoes);
-      if (!itens.length) throw new Error('Selecione pelo menos um conteúdo com texto para classificar.');
-      const resultados = await classificarQuestoesIA(itens, materias, (atual, total) => setProgresso(`Classificando lote ${atual}/${total}`));
-      const porId = new Map(resultados.map((resultado) => [String(resultado.id), resultado]));
-      setDocumentos((atuais) => atuais.map((doc) => ({
-        ...doc,
-        questoes: doc.questoes.map((questao) => ({
-          ...questao,
-          classificacao: porId.get(String(questao.id)) || questao.classificacao || null,
-        })),
-      })));
+      const itens = documentosSelecionados
+        .flatMap((doc) => doc.questoes)
+        .filter((questao) => !questao.classificacao);
+      if (!itens.length) {
+        setErro('Todos os conteúdos selecionados já estão classificados.');
+        return;
+      }
+
+      const aplicar = (lista) => {
+        const porId = new Map(lista.map((r) => [String(r.id), r]));
+        setDocumentos((atuais) => atuais.map((doc) => ({
+          ...doc,
+          questoes: doc.questoes.map((questao) => ({
+            ...questao,
+            classificacao: questao.classificacao || porId.get(String(questao.id)) || null,
+          })),
+        })));
+      };
+
+      const resultado = await classificarQuestoesIA(
+        itens,
+        materias,
+        (atual, total, mensagem) => setProgresso(mensagem || `Lote ${atual}/${total}`),
+        aplicar,
+      );
+
+      aplicar(resultado.classificacoes);
+
+      if (resultado.interrompido) {
+        setErro(`${resultado.classificacoes.length} de ${itens.length} classificados antes do limite da IA. `
+          + 'Clique de novo em alguns minutos para continuar de onde parou — o que já foi feito está salvo.');
+      } else if (resultado.falhas.length) {
+        setErro(`${resultado.falhas.length} conteúdo(s) não foram classificados. ${resultado.erro || ''}`);
+      }
     } catch (error) {
       setErro(error.message);
     } finally {
@@ -266,6 +312,10 @@ export default function AnalisarProva() {
 
   async function gerarCronograma() {
     setErro('');
+    if (!dataInicio || !dataFinal) {
+      setErro('Informe a data de início e a data final antes de gerar.');
+      return;
+    }
     setProcessando(true);
     setProgresso('Gerando cronograma com os conteúdos selecionados…');
     try {
@@ -397,7 +447,12 @@ export default function AnalisarProva() {
                               </label>
                               <div className="content-badges">
                                 {item.pagina && <span>Página {item.pagina}</span>}
-                                {item.classificacao && <span>{item.classificacao.materia_nome} · {item.classificacao.assunto_nome}</span>}
+                                {item.classificacao && (
+                                  <span>
+                                    {item.classificacao.materia_nome} · {item.classificacao.assunto_nome}
+                                    {item.classificacao.origem === 'cabecalho_de_area' ? ' · do caderno' : ''}
+                                  </span>
+                                )}
                                 {item.origem === 'conteudo_adicionado' && (
                                   <button className="text-button" type="button" onClick={() => removerConteudo(doc.hash, item.id)}>Excluir</button>
                                 )}
@@ -420,21 +475,22 @@ export default function AnalisarProva() {
           </div>
 
           <div className="button-row wrap">
-            <button className="btn btn-primary" onClick={classificar} disabled={processando || !selecao.conteudos}>
-              Classificar seleção com IA
+            <button className="btn btn-primary" onClick={classificar} disabled={processando || !semClassificacao}>
+              {semClassificacao
+                ? `Classificar ${semClassificacao} conteúdo(s) com IA`
+                : 'Tudo já classificado'}
             </button>
-            <button
-              className="btn"
-              onClick={salvar}
-              disabled={processando || !selecao.conteudos || selecao.classificados !== selecao.conteudos}
-            >
+            <button className="btn" onClick={salvar} disabled={processando || !selecao.conteudos}>
               Salvar conteúdos selecionados
             </button>
             <button className="btn" onClick={exportar} disabled={!selecao.conteudos}>Exportar seleção JSON</button>
           </div>
 
-          {selecao.conteudos > 0 && selecao.classificados !== selecao.conteudos && (
-            <p className="selection-help">Classifique todos os conteúdos selecionados antes de salvar e gerar o cronograma.</p>
+          {semClassificacao > 0 && (
+            <p className="selection-help">
+              {semClassificacao} conteúdo(s) ainda sem matéria. Você pode salvar e gerar o cronograma
+              assim mesmo — eles entram agrupados como não classificados, e o cronograma sai mais grosseiro.
+            </p>
           )}
 
           {frequencias.length > 0 && (
@@ -457,6 +513,14 @@ export default function AnalisarProva() {
           )}
         </>
       )}
+      {frequencias.length > 0 && (
+        <PlanejarCronogramaPanel
+          documentosSelecionados={documentosSelecionados}
+          frequencias={frequencias}
+          materias={materias}
+          nomeSugerido={nome}
+        />
+      )}
 
       {analiseId && (
         <div className="card schedule-generator">
@@ -467,9 +531,10 @@ export default function AnalisarProva() {
             <label>Fim<input type="date" value={dataFinal} onChange={(event) => setDataFinal(event.target.value)} /></label>
             <label>Horas/dia<input type="number" min="0.5" step="0.5" value={horas} onChange={(event) => setHoras(event.target.value)} /></label>
           </div>
-          <button className="btn btn-primary" disabled={!dataFinal || processando} onClick={gerarCronograma}>
+          <button className="btn btn-primary" disabled={!dataInicio || !dataFinal || processando} onClick={gerarCronograma}>
             Criar cronograma automático
           </button>
+          {!dataFinal && <p className="selection-help">Informe a data final para liberar a geração.</p>}
         </div>
       )}
     </div>

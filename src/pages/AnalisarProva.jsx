@@ -302,11 +302,16 @@ export default function AnalisarProva() {
     try {
       const todas = documentosSelecionados.flatMap((doc) => doc.questoes);
 
-      // O cache vem primeiro: cada questão passa pela IA uma vez na vida.
-      // Subir a mesma prova de novo, ou uma edição que reaproveite enunciados,
-      // não custa chamada nenhuma.
+      // O cache vem primeiro. Se a migration ainda não estiver publicada, a
+      // classificação continua funcionando e apenas deixa de reaproveitar
+      // respostas anteriores.
       setProgresso('Consultando o que já foi classificado antes…');
-      const cache = await aplicarCache(todas);
+      let cache = { aplicadas: 0, consultados: 0, restantes: todas.length };
+      try {
+        cache = await aplicarCache(todas);
+      } catch (cacheError) {
+        setAviso(`Cache temporariamente indisponível: ${cacheError.message}. A classificação seguirá com IA.`);
+      }
       if (cache.aplicadas) setDocumentos((atuais) => [...atuais]);
 
       const itens = todas.filter((questao) => !questao.classificacao);
@@ -328,17 +333,43 @@ export default function AnalisarProva() {
         })));
       };
 
-      const contextoProva = documentosSelecionados.find((doc) => doc.contexto)?.contexto || null;
+      // Cada documento é enviado com o próprio contexto temático. Antes, o
+      // contexto da primeira prova era aplicado indevidamente a todas as outras.
+      const grupos = documentosSelecionados
+        .map((doc) => ({
+          nome: doc.nome,
+          contextoProva: doc.contexto || null,
+          itens: doc.questoes.filter((questao) => !questao.classificacao),
+        }))
+        .filter((grupo) => grupo.itens.length);
 
-      const resultado = await classificarQuestoesIA(
-        itens,
-        materias,
-        (atual, total, mensagem) => setProgresso(mensagem || `Lote ${atual}/${total}`),
-        aplicar,
-        { contextoProva },
-      );
+      const resultado = {
+        classificacoes: [],
+        falhas: [],
+        interrompido: false,
+        erro: null,
+      };
 
-      aplicar(resultado.classificacoes);
+      for (let indice = 0; indice < grupos.length; indice += 1) {
+        const grupo = grupos[indice];
+        const parcial = await classificarQuestoesIA(
+          grupo.itens,
+          materias,
+          (atual, total, mensagem) => setProgresso(
+            `[${indice + 1}/${grupos.length}] ${grupo.nome}: ${mensagem || `Lote ${atual}/${total}`}`
+          ),
+          (lista) => aplicar([...resultado.classificacoes, ...lista]),
+          { contextoProva: grupo.contextoProva },
+        );
+
+        resultado.classificacoes.push(...parcial.classificacoes);
+        resultado.falhas.push(...parcial.falhas);
+        resultado.interrompido = resultado.interrompido || parcial.interrompido;
+        resultado.erro = parcial.erro || resultado.erro;
+        aplicar(resultado.classificacoes);
+
+        if (parcial.interrompido) break;
+      }
 
       const naoCanonicas = resultado.classificacoes.filter((c) => c.canonico === false).length;
       if (resultado.interrompido) {

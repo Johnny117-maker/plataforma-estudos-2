@@ -39,9 +39,15 @@ function tokensNaJanela() {
 }
 
 async function reservarTokens(tokens, onEspera) {
+  // O orçamento estimado de uma única chamada pode ultrapassar o teto local
+  // conservador por causa da taxonomia e do JSON de saída. Nesse caso,
+  // reservamos a janela inteira e fazemos uma chamada isolada. Sem esse limite,
+  // `janela[0]` fica indefinido e o processo quebra antes de chamar a IA.
+  const reserva = Math.min(TETO_TPM, Math.max(1, Math.ceil(tokens)));
+
   for (;;) {
-    if (tokensNaJanela() + tokens <= TETO_TPM) {
-      janela.push({ em: Date.now(), tokens });
+    if (tokensNaJanela() + reserva <= TETO_TPM) {
+      janela.push({ em: Date.now(), tokens: reserva });
       return;
     }
     const maisAntigo = janela[0];

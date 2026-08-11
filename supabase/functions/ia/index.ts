@@ -1,12 +1,15 @@
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 const DEFAULT_LLAMA_MODEL = 'llama-3.1-8b-instant';
 const DEFAULT_GPT_OSS_MODEL = 'openai/gpt-oss-20b';
-const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+const DEFAULT_GEMINI_FLASH_LITE_MODEL = 'gemini-3.5-flash-lite';
+const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-3.5-flash';
 const MAX_JSON_BODY_BYTES = 180_000;
 const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 const MAX_MULTIPART_BYTES = MAX_DOCUMENT_BYTES + 1024 * 1024;
 const MAX_TOKENS = 4_000;
 const MAX_CHARS_QUESTAO = 1_500;
+const MAX_QUESTOES_GROQ = 8;
+const MAX_QUESTOES_GEMINI = 30;
 const MIME_VISUAIS = new Set([
   'application/pdf',
   'image/png',
@@ -96,6 +99,8 @@ type GenericBody = {
   system?: string;
   maxTokens?: number;
   modeloPreferido?: 'llama' | 'gpt-oss';
+  modeloGemini?: 'flash-lite' | 'flash';
+  provedorPreferido?: 'auto' | 'groq' | 'gemini';
 };
 
 type QuestaoEntrada = {
@@ -112,6 +117,8 @@ type ClassifyBody = {
   taxonomia?: string;
   contextoProva?: string | null;
   modeloPreferido?: 'llama' | 'gpt-oss';
+  modeloGemini?: 'flash-lite' | 'flash';
+  provedorPreferido?: 'auto' | 'groq' | 'gemini';
 };
 
 function promptClassificacao(body: ClassifyBody) {
@@ -168,8 +175,9 @@ Responda:
 
 function buildGroqInput(body: GenericBody | ClassifyBody) {
   if (body.acao === 'classificar_questoes') {
-    if (!Array.isArray(body.questoes) || body.questoes.length < 1 || body.questoes.length > 8) {
-      throw new Error('Cada lote deve conter entre 1 e 8 questões.');
+    if (!Array.isArray(body.questoes) || body.questoes.length < 1
+      || body.questoes.length > MAX_QUESTOES_GEMINI) {
+      throw new Error(`Cada lote deve conter entre 1 e ${MAX_QUESTOES_GEMINI} questões.`);
     }
     const { system, prompt } = promptClassificacao(body);
     if (prompt.length > 80_000) throw new Error('Prompt acima do limite de tamanho.');
@@ -202,6 +210,9 @@ function modelosGroq(body: GenericBody | ClassifyBody) {
 }
 
 async function chamarGroq(body: GenericBody | ClassifyBody, apiKey: string) {
+  if (body.acao === 'classificar_questoes' && body.questoes.length > MAX_QUESTOES_GROQ) {
+    throw new FalhaProvedor('Lote grande reservado ao Gemini.', 413);
+  }
   const input = buildGroqInput(body);
   const modelos = modelosGroq(body);
   let retryAfter = 15;
@@ -251,7 +262,13 @@ async function chamarGroq(body: GenericBody | ClassifyBody, apiKey: string) {
     try {
       return {
         resultado: extractJson(conteudo),
-        ia: { provedor: 'groq', modelo, fallbackUsado: indice > 0 },
+        ia: {
+          provedor: 'groq',
+          modelo,
+          fallbackUsado: indice > 0,
+          tokensRestantes: Number(response.headers.get('x-ratelimit-remaining-tokens')) || null,
+          resetTokens: response.headers.get('x-ratelimit-reset-tokens') || null,
+        },
       };
     } catch {
       // JSON quebrado no modelo rápido é refeito pelo modelo alternativo.
@@ -274,6 +291,137 @@ function textoDaInteracao(payload: Record<string, unknown>) {
     if (textos.length) return textos.join('\n');
   }
   return '';
+}
+
+function schemaClassificacao() {
+  return {
+    type: 'text',
+    mime_type: 'application/json',
+    schema: {
+      type: 'object',
+      properties: {
+        classificacoes: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              materia_nome: { type: 'string' },
+              assunto_nome: { type: 'string' },
+              dificuldade: { type: 'string', enum: ['facil', 'media', 'dificil'] },
+              confianca: { type: 'number', minimum: 0, maximum: 1 },
+            },
+            required: ['id', 'materia_nome', 'assunto_nome', 'dificuldade', 'confianca'],
+          },
+        },
+      },
+      required: ['classificacoes'],
+    },
+  };
+}
+
+async function chamarGeminiTexto(
+  body: GenericBody | ClassifyBody,
+  apiKey: string,
+  fallbackDaGroq: FalhaProvedor | null = null,
+) {
+  const input = buildGroqInput(body);
+  const modelo = body.modeloGemini === 'flash'
+    ? (Deno.env.get('GEMINI_FLASH_MODEL') || DEFAULT_GEMINI_FLASH_MODEL)
+    : (Deno.env.get('GEMINI_FLASH_LITE_MODEL') || Deno.env.get('GEMINI_MODEL')
+      || DEFAULT_GEMINI_FLASH_LITE_MODEL);
+  const requestBody: Record<string, unknown> = {
+    model: modelo,
+    input: [{
+      type: 'text',
+      text: `INSTRUÇÕES DO SISTEMA\n${input.system}\n\nSOLICITAÇÃO\n${input.prompt}`,
+    }],
+    store: false,
+    generation_config: { thinking_level: 'minimal' },
+  };
+  if (body.acao === 'classificar_questoes') {
+    requestBody.response_format = schemaClassificacao();
+  }
+
+  const response = await fetchComTimeout('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  }, 120_000);
+
+  if (response.status === 429) {
+    throw new FalhaProvedor('Limite de uso do Gemini atingido.', 429,
+      retryAfterSeconds(response.headers.get('retry-after')));
+  }
+  if ([401, 403].includes(response.status)) {
+    throw new FalhaProvedor('A chave do Gemini não foi aceita.', 503);
+  }
+  if (!response.ok) throw new FalhaProvedor('O Gemini não respondeu corretamente.', response.status);
+
+  const payload = await response.json();
+  const texto = textoDaInteracao(payload);
+  if (!texto) throw new FalhaProvedor('O Gemini retornou uma resposta vazia.');
+
+  return {
+    resultado: extractJson(texto),
+    ia: {
+      provedor: 'gemini',
+      modelo,
+      fallbackUsado: Boolean(fallbackDaGroq),
+      motivoFallback: fallbackDaGroq
+        ? (fallbackDaGroq.status === 429 ? 'groq_rate_limit' : 'groq_indisponivel')
+        : null,
+      groqRetryAfter: fallbackDaGroq?.retryAfter || null,
+    },
+  };
+}
+
+async function chamarTextoHibrido(body: GenericBody | ClassifyBody) {
+  const groqKey = Deno.env.get('GROQ_API_KEY') || '';
+  const geminiKey = Deno.env.get('GEMINI_API_KEY') || '';
+  const preferido = body.provedorPreferido || 'auto';
+
+  if (!groqKey && !geminiKey) {
+    throw new FalhaProvedor('Groq e Gemini não estão configurados no Supabase.', 503);
+  }
+
+  const loteGrande = body.acao === 'classificar_questoes'
+    && body.questoes.length > MAX_QUESTOES_GROQ;
+  const geminiPrimeiro = preferido === 'gemini' || loteGrande || !groqKey;
+
+  if (geminiPrimeiro) {
+    if (geminiKey) {
+      try {
+        return await chamarGeminiTexto(body, geminiKey);
+      } catch (error) {
+        if (preferido === 'gemini' || loteGrande || !groqKey) throw error;
+      }
+    }
+    return await chamarGroq(body, groqKey);
+  }
+
+  let falhaGroq: FalhaProvedor | null = null;
+  try {
+    return await chamarGroq(body, groqKey);
+  } catch (error) {
+    if (!(error instanceof FalhaProvedor)) throw error;
+    falhaGroq = error;
+    const recuperavel = [429, 500, 502, 503, 504].includes(error.status);
+    if (preferido === 'groq' || !recuperavel || !geminiKey) throw error;
+  }
+
+  try {
+    return await chamarGeminiTexto(body, geminiKey, falhaGroq);
+  } catch (error) {
+    if (error instanceof FalhaProvedor && error.status === 429 && falhaGroq?.status === 429) {
+      throw new FalhaProvedor(
+        'Groq e Gemini atingiram o limite temporário. O processamento será retomado automaticamente.',
+        429,
+        Math.max(error.retryAfter || 15, falhaGroq.retryAfter || 15),
+      );
+    }
+    throw error;
+  }
 }
 
 function mimeDoArquivo(arquivo: File) {
@@ -381,7 +529,10 @@ async function chamarGemini(arquivo: File, acao: string, questoes: number[], api
     throw new Error('O documento visual deve ter no máximo 25 MB.');
   }
 
-  const modelo = Deno.env.get('GEMINI_MODEL') || DEFAULT_GEMINI_MODEL;
+  // OCR, gráficos, mapas e fórmulas exigem mais raciocínio visual que a
+  // classificação textual. O Flash-Lite continua sendo o padrão barato para
+  // texto; arquivos visuais sobem explicitamente para Flash.
+  const modelo = Deno.env.get('GEMINI_FLASH_MODEL') || DEFAULT_GEMINI_FLASH_MODEL;
   const file = await uploadGemini(arquivo, mimeType, apiKey);
   try {
     const ocr = acao === 'ocr_documento';
@@ -469,14 +620,12 @@ Deno.serve(async (req) => {
 
     if (multipart) return await tratarDocumento(req, requestId);
 
-    const apiKey = Deno.env.get('GROQ_API_KEY');
-    if (!apiKey) return json(req, { erro: 'Groq não configurada no Supabase.', requestId }, 503);
     const bruto = await req.text();
     if (bruto.length > MAX_JSON_BODY_BYTES) {
       return json(req, { erro: 'Requisição acima do limite.', requestId }, 413);
     }
     const body = JSON.parse(bruto) as GenericBody | ClassifyBody;
-    const resposta = await chamarGroq(body, apiKey);
+    const resposta = await chamarTextoHibrido(body);
     return json(req, { ...resposta, requestId });
   } catch (error) {
     const mensagem = error instanceof Error ? error.message : 'Falha inesperada.';

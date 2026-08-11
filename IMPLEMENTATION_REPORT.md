@@ -1,5 +1,22 @@
 # Relatório de implementação
 
+## Atualização: classificação assíncrona persistente
+
+O analisador deixou de depender de uma sequência de requisições mantida pelo navegador:
+
+- `analise_jobs` persiste modo, snapshot, progresso e contadores;
+- `analise_lotes` persiste payload, tentativas, provedor, modelo e resultado;
+- `pgmq` conserva cada mensagem até gravação confirmada;
+- `analise-worker` processa a fila fora da requisição do usuário e se auto-invoca;
+- `pg_cron` acorda o worker a cada minuto como recuperação adicional;
+- Flash-Lite é o classificador padrão e Flash atende visual/baixa confiança;
+- Gemini Batch é automático a partir de 800 conteúdos e possui fallback para fila;
+- Groq é um acelerador opcional, com fallback imediato para Gemini;
+- a tela restaura resultados depois de recarregar ou reabrir o navegador.
+
+Validação desta atualização: ESLint aprovado, 21 testes aprovados, build Vite aprovado,
+as duas Edge Functions aprovadas por `deno check` e os dois arquivos SQL aprovados pelo parser PostgreSQL 17.
+
 ## Atualização: cronograma por conteúdo selecionado
 
 O analisador de provas agora permite combinar um ou mais conteúdos de um ou mais arquivos antes de gerar o cronograma:

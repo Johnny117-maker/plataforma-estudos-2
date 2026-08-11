@@ -6,7 +6,8 @@
 - **Processamento local:** PDF.js para PDF, Mammoth para DOCX e regras determinísticas de segmentação.
 - **Dados:** Supabase JS acessando PostgreSQL sob RLS.
 - **Transações:** RPCs PL/pgSQL para operações compostas.
-- **IA:** Edge Function Deno autenticada, com chamadas server-side à Groq.
+- **Fila:** Supabase Queues/pgmq com mensagens duráveis e visibility timeout.
+- **IA:** Edge Functions Deno autenticadas; Gemini como base e Groq como acelerador opcional.
 
 ## Pipeline de provas
 
@@ -15,17 +16,23 @@ flowchart TD
   A[Arquivos locais] --> B[Extração]
   B --> C[Segmentação]
   C --> D[Seleção e edição]
-  D --> E[Classificação em lotes]
-  E --> F[Persistência transacional]
-  F --> G[Frequência por assunto]
-  G --> H[Cronograma priorizado]
+  D --> E[Job e snapshot]
+  E --> F[Supabase Queue]
+  F --> G[Worker e IAs]
+  G --> H[Resultados persistidos]
+  H --> I[Frequência por assunto]
+  I --> J[Cronograma priorizado]
 ```
 
-Os arquivos originais não são enviados à IA. O usuário escolhe arquivos e conteúdos individualmente. Questões reconhecidas, trechos automáticos e conteúdos complementares usam a mesma estrutura de classificação. A Edge Function recebe somente o texto selecionado, limitado por tamanho e agrupado em lotes. A persistência também salva somente essa seleção.
+Os arquivos originais não são enviados à classificação textual. O usuário escolhe arquivos e conteúdos individualmente. Questões reconhecidas, trechos automáticos e conteúdos complementares usam a mesma estrutura. A fila recebe somente o texto selecionado, limitado por tamanho e agrupado em lotes. PDFs digitalizados e elementos visuais continuam sendo enviados ao Gemini quando necessário.
+
+`analise-worker` grava cada lote antes de removê-lo da queue. Rate limits produzem uma nova mensagem com atraso; encerramentos inesperados são recuperados pelo visibility timeout e pelo cron. Jobs a partir de 800 conteúdos usam Batch no modo automático. Resultados visuais ou com confiança abaixo de 0,62 são refinados pelo Flash.
 
 ## Modelo de dados novo
 
 `analises_provas` possui muitos `documentos_prova`; cada documento possui muitas `questoes_extraidas`; as frequências agregadas ficam em `frequencias_assuntos`. Um `cronograma` pode referenciar a análise que o originou.
+
+`analise_jobs` guarda dono, modo, snapshot, estado e contadores. `analise_lotes` guarda payload, tentativas, provedor, modelo e resultado de cada unidade de trabalho. As tabelas da extensão `pgmq` não são expostas ao frontend.
 
 ## Decisões de segurança
 

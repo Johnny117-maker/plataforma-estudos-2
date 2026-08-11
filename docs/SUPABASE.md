@@ -20,6 +20,7 @@
 - recria views com `security_invoker`;
 - instala RPCs transacionais.
 - adiciona disponibilidade semanal, prioridades, desempenho, revisões e reorganização adaptativa.
+- adiciona jobs, lotes, Supabase Queue e retomada automática da classificação.
 
 As colunas antigas `data_alvo` e `ritmo_horas_dia` são removidas somente depois da cópia dos valores.
 
@@ -63,20 +64,28 @@ Teste com dois usuários diferentes. Cada usuário deve enxergar somente seus pr
 | `criar_cronograma_adaptativo` | Salva configuração, fases, tarefas e revisões em uma transação |
 | `registrar_desempenho_tarefa` | Conclui a tarefa e cria reforço D+2 abaixo de 60% |
 | `aplicar_reorganizacao_adaptativa` | Move apenas tarefas pendentes e não fixas, guardando histórico |
+| `criar_job_classificacao` | Cria job, snapshot, lotes e mensagens em uma transação |
+| `cancelar_job_classificacao` | Cancela somente jobs pertencentes ao usuário autenticado |
 
 Todas exigem sessão autenticada e derivam o dono de `auth.uid()`.
 
 ## Edge Function
 
 ```bash
-supabase secrets set GROQ_API_KEY=SUA_CHAVE
 supabase secrets set GEMINI_API_KEY=SUA_CHAVE
-supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b GEMINI_MODEL=gemini-3.5-flash-lite
+supabase secrets set GEMINI_FLASH_LITE_MODEL=gemini-3.5-flash-lite GEMINI_FLASH_MODEL=gemini-3.5-flash
+supabase secrets set GROQ_API_KEY=SUA_CHAVE
 supabase secrets set ALLOWED_ORIGINS=http://localhost:5173,https://seu-dominio.com
 supabase functions deploy ia
+supabase functions deploy analise-worker
 ```
 
 Não use `--no-verify-jwt`.
+
+A função `ia` mantém as chaves e uniformiza os provedores. `analise-worker` consome a queue, usa Flash-Lite
+por padrão, Flash para visual/refino e Batch para alto volume. Groq é opcional e nunca bloqueia o job.
+Configure o acionamento a cada minuto com `supabase/setup/CONFIGURAR_ANALISE_WORKER_CRON.sql`; a chave pública
+e a URL são armazenadas no Vault. Detalhes estão em `INSTALACAO_ANALISE_ASSINCRONA.md`.
 
 ## Reversão
 

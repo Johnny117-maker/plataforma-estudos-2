@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { criarLinhasDeTexto, extrairDeArquivo } from '../lib/extrairTexto';
 import {
-  classificarQuestoesIA,
   descreverQuestoesVisuaisGemini,
   extrairDocumentoVisualGemini,
 } from '../lib/iaService';
@@ -17,6 +16,18 @@ import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
 import { aplicarCache } from '../lib/cacheClassificacao';
 import { aplicarDescricoesVisuais } from '../lib/documentoVisual';
+import {
+  acordarWorkerAnalise,
+  aplicarResultadosAoSnapshot,
+  cancelarJobClassificacao,
+  criarJobClassificacao,
+  listarJobsClassificacao,
+  obterJobClassificacao,
+  percentualJob,
+  rotuloStatusJob,
+  STATUS_JOB_ATIVOS,
+  STATUS_JOB_FINAIS,
+} from '../lib/analiseAssincrona';
 import { salvarAnaliseProvas } from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
@@ -74,9 +85,14 @@ function rotuloConteudo(item, indice) {
 
 export default function AnalisarProva() {
   const inputRef = useRef(null);
+  const resultadoCarregadoRef = useRef(null);
   const [perfil, setPerfil] = useState('auto');
+  const [modoProcessamento, setModoProcessamento] = useState('auto');
+  const [usarGroq, setUsarGroq] = useState(false);
   const [documentos, setDocumentos] = useState([]);
   const [materias, setMaterias] = useState([]);
+  const [jobs, setJobs] = useState([]);
+  const [jobAtivo, setJobAtivo] = useState(null);
   const [processando, setProcessando] = useState(false);
   const [progresso, setProgresso] = useState('');
   const [erro, setErro] = useState('');
@@ -90,7 +106,47 @@ export default function AnalisarProva() {
       .select('id,nome,subgeneros(id,nome)')
       .order('ordem')
       .then(({ data }) => setMaterias(data || []));
+    listarJobsClassificacao().then((lista) => {
+      setJobs(lista);
+      const ativo = lista.find((job) => STATUS_JOB_ATIVOS.includes(job.status));
+      if (ativo) setJobAtivo(ativo.id);
+    }).catch(() => {
+      // A migration pode ainda não ter sido aplicada. O erro real aparecerá
+      // quando o usuário tentar iniciar um job, sem bloquear a extração local.
+    });
   }, []);
+
+  useEffect(() => {
+    if (!jobAtivo) return undefined;
+    let desmontado = false;
+
+    async function sincronizar() {
+      try {
+        const { job, lotes } = await obterJobClassificacao(jobAtivo);
+        if (desmontado) return;
+        setJobs((atuais) => [job, ...atuais.filter((item) => item.id !== job.id)].slice(0, 6));
+        if (STATUS_JOB_FINAIS.includes(job.status) && resultadoCarregadoRef.current !== job.id) {
+          resultadoCarregadoRef.current = job.id;
+          setDocumentos(aplicarResultadosAoSnapshot(job.documentos_snapshot, lotes));
+          setNome(job.nome);
+          const concluidos = Number(job.itens_concluidos || 0);
+          const falhos = Number(job.itens_falhos || 0);
+          setAviso(falhos
+            ? `${concluidos} conteúdos classificados e ${falhos} pendentes. O resultado disponível foi restaurado.`
+            : `${concluidos} conteúdos classificados em segundo plano. Resultado restaurado.`);
+        }
+      } catch (pollError) {
+        if (!desmontado) setErro(`Não foi possível atualizar o job: ${pollError.message}`);
+      }
+    }
+
+    sincronizar();
+    const timer = setInterval(sincronizar, 5_000);
+    return () => {
+      desmontado = true;
+      clearInterval(timer);
+    };
+  }, [jobAtivo]);
 
   const documentosSelecionados = useMemo(() => filtrarSelecao(documentos), [documentos]);
   const selecao = useMemo(() => resumirSelecao(documentos), [documentos]);
@@ -358,72 +414,61 @@ export default function AnalisarProva() {
         return;
       }
 
-      const aplicar = (lista) => {
-        const porId = new Map(lista.map((item) => [String(item.id), item]));
-        setDocumentos((atuais) => atuais.map((doc) => ({
-          ...doc,
-          questoes: doc.questoes.map((questao) => ({
-            ...questao,
-            classificacao: questao.classificacao || porId.get(String(questao.id)) || null,
-          })),
-        })));
-      };
+      setProgresso(`Criando fila persistente para ${itens.length} conteúdo(s)…`);
+      const jobId = await criarJobClassificacao({
+        nome,
+        documentos: documentosSelecionados,
+        modo: modoProcessamento,
+        usarGroq,
+      });
+      resultadoCarregadoRef.current = null;
+      setJobAtivo(jobId);
+      const lista = await listarJobsClassificacao();
+      setJobs(lista);
 
-      // Cada documento é enviado com o próprio contexto temático. Antes, o
-      // contexto da primeira prova era aplicado indevidamente a todas as outras.
-      const grupos = documentosSelecionados
-        .map((doc) => ({
-          nome: doc.nome,
-          contextoProva: doc.contexto || null,
-          itens: doc.questoes.filter((questao) => !questao.classificacao),
-        }))
-        .filter((grupo) => grupo.itens.length);
+      const partes = [`${itens.length} conteúdos colocados na fila`];
+      if (cache.aplicadas) partes.push(`${cache.aplicadas} reaproveitados do cache`);
+      partes.push('você pode fechar o navegador');
+      setAviso(`${partes.join(', ')}.`);
 
-      const resultado = {
-        classificacoes: [],
-        falhas: [],
-        interrompido: false,
-        erro: null,
-      };
-
-      for (let indice = 0; indice < grupos.length; indice += 1) {
-        const grupo = grupos[indice];
-        const parcial = await classificarQuestoesIA(
-          grupo.itens,
-          materias,
-          (atual, total, mensagem) => setProgresso(
-            `[${indice + 1}/${grupos.length}] ${grupo.nome}: ${mensagem || `Lote ${atual}/${total}`}`
-          ),
-          (lista) => aplicar([...resultado.classificacoes, ...lista]),
-          { contextoProva: grupo.contextoProva },
-        );
-
-        resultado.classificacoes.push(...parcial.classificacoes);
-        resultado.falhas.push(...parcial.falhas);
-        resultado.interrompido = resultado.interrompido || parcial.interrompido;
-        resultado.erro = parcial.erro || resultado.erro;
-        aplicar(resultado.classificacoes);
-
-        if (parcial.interrompido) break;
-      }
-
-      const naoCanonicas = resultado.classificacoes.filter((c) => c.canonico === false).length;
-      if (resultado.interrompido) {
-        setErro(`${resultado.classificacoes.length} de ${itens.length} classificados antes do limite da IA. `
-          + 'Clique de novo em alguns minutos para continuar de onde parou — o que já foi feito está salvo.');
-      } else if (resultado.falhas.length) {
-        setErro(`${resultado.falhas.length} conteúdo(s) não foram classificados. ${resultado.erro || ''}`);
-      } else {
-        const partes = [`${resultado.classificacoes.length} classificados pela IA`];
-        if (cache.aplicadas) partes.push(`${cache.aplicadas} reaproveitados do cache`);
-        if (naoCanonicas) partes.push(`${naoCanonicas} fora da taxonomia (revise)`);
-        setAviso(`${partes.join(', ')}.`);
+      try {
+        await acordarWorkerAnalise();
+      } catch (workerError) {
+        setAviso(`${partes.join(', ')}. O acionamento imediato falhou (${workerError.message}), `
+          + 'mas o job continua salvo e o agendador tentará novamente.');
       }
     } catch (error) {
       setErro(error.message);
     } finally {
       setProcessando(false);
       setProgresso('');
+    }
+  }
+
+  async function abrirResultadoJob(jobId) {
+    setErro('');
+    try {
+      const { job, lotes } = await obterJobClassificacao(jobId);
+      resultadoCarregadoRef.current = STATUS_JOB_FINAIS.includes(job.status) ? job.id : null;
+      setDocumentos(aplicarResultadosAoSnapshot(job.documentos_snapshot, lotes));
+      setNome(job.nome);
+      setJobAtivo(job.id);
+      setAviso(STATUS_JOB_FINAIS.includes(job.status)
+        ? 'Resultado restaurado. Revise as classificações e salve a análise quando desejar.'
+        : 'O snapshot e os resultados já concluídos foram restaurados; o restante continua em segundo plano.');
+    } catch (error) {
+      setErro(error.message);
+    }
+  }
+
+  async function cancelarJob(jobId) {
+    setErro('');
+    try {
+      await cancelarJobClassificacao(jobId);
+      setJobs(await listarJobsClassificacao());
+      if (jobAtivo === jobId) setJobAtivo(null);
+    } catch (error) {
+      setErro(error.message);
     }
   }
 
@@ -467,6 +512,23 @@ export default function AnalisarProva() {
         <select value={perfil} onChange={(event) => setPerfil(event.target.value)} aria-label="Modelo de prova">
           {Object.entries(PERFIS).map(([id, item]) => <option key={id} value={id}>{item.rotulo}</option>)}
         </select>
+        <select
+          value={modoProcessamento}
+          onChange={(event) => setModoProcessamento(event.target.value)}
+          aria-label="Modo de processamento"
+        >
+          <option value="auto">Automático: fila rápida ou Batch</option>
+          <option value="fila">Fila rápida com Gemini</option>
+          <option value="batch">Gemini Batch econômico</option>
+        </select>
+        <label className="toggle-inline">
+          <input
+            type="checkbox"
+            checked={usarGroq}
+            onChange={(event) => setUsarGroq(event.target.checked)}
+          />
+          <span>Usar Groq como acelerador opcional</span>
+        </label>
         <input
           value={nome}
           onChange={(event) => { setNome(event.target.value); setAnaliseId(null); }}
@@ -493,9 +555,63 @@ export default function AnalisarProva() {
         <span>PDF, DOCX, TXT, Markdown ou imagem · até {MAX_ARQUIVOS} arquivos · 25 MB por arquivo</span>
       </div>
 
+      <p className="selection-help">
+        O Flash-Lite classifica os lotes textuais; o Flash assume questões visuais e classificações ambíguas.
+        No modo automático, análises com 800 ou mais conteúdos usam o Gemini Batch. A Groq nunca é obrigatória:
+        se o acelerador falhar, o mesmo lote segue pelo Gemini.
+      </p>
+
       {processando && <div className="empty-state">{progresso || 'Processando…'}</div>}
       {erro && <div className="form-error card">{erro}</div>}
       {aviso && !erro && <div className="card selection-help">{aviso}</div>}
+
+      {jobs.length > 0 && (
+        <section className="analysis-jobs">
+          <div className="section-heading">
+            <div>
+              <h3>Processamentos em segundo plano</h3>
+              <p>O progresso fica salvo mesmo se esta página ou o navegador forem fechados.</p>
+            </div>
+          </div>
+          <div className="analysis-job-list">
+            {jobs.map((job) => {
+              const percentual = percentualJob(job);
+              const ativo = STATUS_JOB_ATIVOS.includes(job.status);
+              const provedores = job.provedores || {};
+              return (
+                <article className={`card analysis-job${job.id === jobAtivo ? ' is-active' : ''}`} key={job.id}>
+                  <div className="analysis-job-header">
+                    <div>
+                      <strong>{job.nome}</strong>
+                      <span>{rotuloStatusJob(job.status)} · {job.modo_efetivo === 'batch' ? 'Gemini Batch' : 'Fila rápida'}</span>
+                    </div>
+                    <strong>{percentual}%</strong>
+                  </div>
+                  <progress max="100" value={percentual}>{percentual}%</progress>
+                  <div className="analysis-job-meta">
+                    <span>{job.itens_concluidos}/{job.total_itens} classificados</span>
+                    {job.itens_falhos > 0 && <span>{job.itens_falhos} pendentes</span>}
+                    {provedores.gemini_flash_lite > 0 && <span>{provedores.gemini_flash_lite} Flash-Lite</span>}
+                    {provedores.gemini_flash > 0 && <span>{provedores.gemini_flash} Flash</span>}
+                    {provedores.groq > 0 && <span>{provedores.groq} Groq</span>}
+                  </div>
+                  {job.erro && <small className="document-warning">{job.erro}</small>}
+                  <div className="button-row wrap compact-row">
+                    <button className="btn" type="button" onClick={() => abrirResultadoJob(job.id)}>
+                      {ativo ? 'Abrir progresso' : 'Abrir resultado'}
+                    </button>
+                    {ativo && (
+                      <button className="btn btn-danger-text" type="button" onClick={() => cancelarJob(job.id)}>
+                        Cancelar
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {documentos.length > 0 && (
         <>
@@ -610,7 +726,7 @@ export default function AnalisarProva() {
           <div className="button-row wrap">
             <button className="btn btn-primary" onClick={classificar} disabled={processando || !selecao.conteudos}>
               {semClassificacao
-                ? `Classificar ${semClassificacao} conteúdo(s)`
+                ? `Classificar ${semClassificacao} em segundo plano`
                 : 'Reconferir classificações'}
             </button>
             <button className="btn" onClick={salvar} disabled={processando || !selecao.conteudos}>

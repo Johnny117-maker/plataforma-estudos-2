@@ -1,5 +1,10 @@
 import { supabase } from '../supabaseClient';
 import { taxonomiaParaPrompt, normalizarPar } from './taxonomiaFatec';
+import {
+  calcularIndisponibilidadeGroq,
+  escolherRota,
+  somarUsoProvedor,
+} from './roteadorIA';
 
 // Os limites gratuitos da Groq são separados por modelo. Alternar os lotes
 // permite usar a capacidade dos dois modelos sem disparar chamadas paralelas
@@ -8,13 +13,12 @@ const MODELOS = {
   llama: { preferencia: 'llama', tetoLocalTpm: 5_200 },
   'gpt-oss': { preferencia: 'gpt-oss', tetoLocalTpm: 7_000 },
 };
-const TOKENS_POR_LOTE = 1_800;
-const MAX_ITENS_LOTE = 8;
 const MAX_CHARS_QUESTAO = 1_400;
-const MAX_TENTATIVAS = 2;
+const MAX_TENTATIVAS = 4;
 const ESPERA_MAXIMA_MS = 70_000;
 const FIM_LLAMA_31 = Date.parse('2026-08-17T00:00:00Z');
 let proximoModelo = 0;
+let groqIndisponivelAte = 0;
 
 function esperar(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,21 +39,13 @@ function tokensNaJanela(modelo) {
   return janela.reduce((soma, registro) => soma + registro.tokens, 0);
 }
 
-async function reservarTokens(modelo, tokens, onEspera) {
+function reservarTokensSeCouber(modelo, tokens) {
   const janela = janelas.get(modelo);
   const teto = MODELOS[modelo].tetoLocalTpm;
   const reserva = Math.min(teto, Math.max(1, Math.ceil(tokens)));
-
-  for (;;) {
-    if (tokensNaJanela(modelo) + reserva <= teto) {
-      janela.push({ em: Date.now(), tokens: reserva });
-      return;
-    }
-    const maisAntigo = janela[0];
-    const faltam = Math.max(1_000, 60_000 - (Date.now() - maisAntigo.em) + 250);
-    onEspera?.(Math.ceil(faltam / 1_000));
-    await esperar(Math.min(faltam, 61_000));
-  }
+  if (tokensNaJanela(modelo) + reserva > teto) return false;
+  janela.push({ em: Date.now(), tokens: reserva });
+  return true;
 }
 
 async function detalharErro(error) {
@@ -89,18 +85,21 @@ async function invocarIA(body, { tentativa = 0, onEspera } = {}) {
     }
 
     const erro = new Error(limite
-      ? 'O limite de uso da IA continua ativo depois de várias tentativas. Aguarde um minuto e clique de novo para continuar de onde parou.'
+      ? 'O limite de uso da IA continua ativo depois de várias tentativas.'
       : detalhe.mensagem);
     erro.limite = limite;
     throw erro;
   }
 
   if (data?.resultado === undefined) throw new Error('A IA não retornou um resultado válido.');
-  return data.resultado;
+  return { resultado: data.resultado, ia: data.ia || {} };
 }
 
-export function perguntarIAJson(prompt, system, maxTokens) {
-  return invocarIA({ acao: 'gerar_json', prompt, system, maxTokens, modeloPreferido: 'gpt-oss' });
+export async function perguntarIAJson(prompt, system, maxTokens) {
+  const resposta = await invocarIA({
+    acao: 'gerar_json', prompt, system, maxTokens, modeloPreferido: 'gpt-oss', provedorPreferido: 'auto',
+  });
+  return resposta.resultado;
 }
 
 async function invocarGeminiComArquivo(arquivo, acao, campos = {}) {
@@ -138,23 +137,18 @@ export async function descreverQuestoesVisuaisGemini(arquivo, numeros) {
 
 // Lotes por orçamento de tokens: uma questão longa viaja sozinha, várias curtas
 // viajam juntas.
-function montarLotes(questoes) {
-  const lotes = [];
+function montarLote(questoes, inicio, maxItens, orcamentoTokens) {
   let atual = [];
   let tokens = 0;
-  for (const questao of questoes) {
+  for (let indice = inicio; indice < questoes.length; indice += 1) {
+    const questao = questoes[indice];
     const texto = String(questao.paraClassificar || questao.enunciado || '').slice(0, MAX_CHARS_QUESTAO);
     const custo = estimarTokens(texto) + 40;
-    if (atual.length && (tokens + custo > TOKENS_POR_LOTE || atual.length >= MAX_ITENS_LOTE)) {
-      lotes.push(atual);
-      atual = [];
-      tokens = 0;
-    }
+    if (atual.length && (tokens + custo > orcamentoTokens || atual.length >= maxItens)) break;
     atual.push({ ...questao, _texto: texto, _tokens: custo });
     tokens += custo;
   }
-  if (atual.length) lotes.push(atual);
-  return lotes;
+  return atual;
 }
 
 /**
@@ -186,9 +180,8 @@ function normalizarClassificacoes(classificacoes) {
  * Classifica em lotes, respeitando o orçamento de tokens.
  *
  * Um lote que falha NÃO derruba os anteriores: o que já foi classificado é
- * entregue via onParcial e devolvido no retorno, então dá para salvar o que
- * deu certo e reprocessar só o resto. Como classificar() só envia o que ainda
- * não tem classificação, clicar de novo continua de onde parou.
+ * entregue via onParcial e devolvido no retorno. Este fluxo permanece para
+ * compatibilidade; a tela principal usa a fila persistente em segundo plano.
  *
  * onProgresso(atual, total, mensagem)
  * onParcial(classificacoesAteAgora)
@@ -196,21 +189,18 @@ function normalizarClassificacoes(classificacoes) {
  * Devolve { classificacoes, falhas, interrompido, erro }.
  */
 export async function classificarQuestoesIA(questoes, _materias = [], onProgresso, onParcial, opcoes = {}) {
-  const { contextoProva = null, modeloPreferido = null } = opcoes;
-  const lotes = montarLotes(questoes);
+  const { contextoProva = null, modeloPreferido = null, estrategia = 'hibrida' } = opcoes;
   const taxonomia = taxonomiaParaPrompt();
   const custoFixo = estimarTokens(taxonomia);
 
   const classificacoes = [];
   const falhas = [];
+  let provedores = { groq: 0, gemini: 0 };
   let interrompido = false;
   let erroFinal = null;
+  let cursor = 0;
 
-  for (let i = 0; i < lotes.length; i += 1) {
-    const lote = lotes[i];
-    const previsto = custoFixo
-      + lote.reduce((soma, q) => soma + q._tokens, 0)
-      + 300 + lote.length * 160;
+  while (cursor < questoes.length) {
     let chaveModelo = modeloPreferido;
     if (!MODELOS[chaveModelo]) {
       chaveModelo = Date.now() < FIM_LLAMA_31 && proximoModelo % 2 === 0
@@ -219,13 +209,25 @@ export async function classificarQuestoesIA(questoes, _materias = [], onProgress
       proximoModelo += 1;
     }
 
-    await reservarTokens(chaveModelo, previsto, (segundos) => {
-      onProgresso?.(i + 1, lotes.length,
-        `Aguardando ${segundos}s pelo limite do modelo ${chaveModelo}…`);
-    });
+    const candidatoGroq = montarLote(questoes, cursor, 8, 1_800);
+    const previstoGroq = custoFixo
+      + candidatoGroq.reduce((soma, q) => soma + q._tokens, 0)
+      + 300 + candidatoGroq.length * 160;
+    const groqForaDoCooldown = Date.now() >= groqIndisponivelAte;
+    const groqComOrcamento = estrategia !== 'gemini'
+      && groqForaDoCooldown
+      && reservarTokensSeCouber(chaveModelo, previstoGroq);
+    const rota = escolherRota({ estrategia, groqDisponivel: groqComOrcamento });
+    const lote = rota.provedorPreferido === 'auto'
+      ? candidatoGroq
+      : montarLote(questoes, cursor, rota.tamanhoLote, rota.orcamentoTokens);
 
-    onProgresso?.(i + 1, lotes.length,
-      `Classificando lote ${i + 1} de ${lotes.length} com ${chaveModelo}`);
+    const emCooldown = estrategia !== 'gemini' && !groqForaDoCooldown;
+    const rotuloRota = rota.provedorPreferido === 'gemini'
+      ? (emCooldown ? 'Gemini enquanto a Groq se recupera' : 'Gemini')
+      : `Groq (${chaveModelo})`;
+    onProgresso?.(cursor, questoes.length,
+      `Classificando ${cursor + 1}–${Math.min(cursor + lote.length, questoes.length)} de ${questoes.length} com ${rotuloRota}`);
 
     try {
       const resposta = await invocarIA({
@@ -233,6 +235,7 @@ export async function classificarQuestoesIA(questoes, _materias = [], onProgress
         taxonomia,
         contextoProva,
         modeloPreferido: MODELOS[chaveModelo].preferencia,
+        provedorPreferido: rota.provedorPreferido,
         questoes: lote.map((questao) => ({
           id: questao.id,
           texto: questao._texto,
@@ -241,12 +244,24 @@ export async function classificarQuestoesIA(questoes, _materias = [], onProgress
           dependeDeVisual: Boolean(questao.dependeDeVisual),
         })),
       }, {
-        onEspera: (segundos) => onProgresso?.(i + 1, lotes.length,
-          `Limite da IA atingido. Nova tentativa em ${segundos}s…`),
+        onEspera: (segundos) => onProgresso?.(cursor, questoes.length,
+          `Groq e Gemini ocupados. Retomando automaticamente em ${segundos}s…`),
       });
 
-      if (!Array.isArray(resposta?.classificacoes)) throw new Error('Formato de classificação inválido.');
-      classificacoes.push(...normalizarClassificacoes(resposta.classificacoes));
+      if (!Array.isArray(resposta.resultado?.classificacoes)) {
+        throw new Error('Formato de classificação inválido.');
+      }
+      const idsEsperados = new Set(lote.map((item) => String(item.id)));
+      const recebidas = resposta.resultado.classificacoes.filter((item) => idsEsperados.has(String(item.id)));
+      if (recebidas.length !== lote.length) {
+        throw new Error(`A IA devolveu ${recebidas.length} de ${lote.length} classificações do lote.`);
+      }
+
+      classificacoes.push(...normalizarClassificacoes(recebidas));
+      provedores = somarUsoProvedor(provedores, resposta.ia, lote.length);
+      const indisponivelAte = calcularIndisponibilidadeGroq(resposta.ia);
+      if (indisponivelAte) groqIndisponivelAte = Math.max(groqIndisponivelAte, indisponivelAte);
+      cursor += lote.length;
       onParcial?.(classificacoes.slice());
     } catch (error) {
       falhas.push(...lote.map((questao) => questao.id));
@@ -258,8 +273,9 @@ export async function classificarQuestoesIA(questoes, _materias = [], onProgress
         break;
       }
       erroFinal = error.message;
+      cursor += lote.length;
     }
   }
 
-  return { classificacoes, falhas, interrompido, erro: erroFinal };
+  return { classificacoes, falhas, interrompido, erro: erroFinal, provedores };
 }

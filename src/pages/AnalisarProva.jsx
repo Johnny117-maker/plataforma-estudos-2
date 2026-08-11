@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
+import { aplicarCache } from '../lib/cacheClassificacao';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 import { extrairDeArquivo } from '../lib/extrairTexto';
 import { classificarQuestoesIA } from '../lib/iaService';
+
 import {
   criarBlocosDeConteudo,
   cruzarFrequencias,
@@ -252,6 +254,21 @@ export default function AnalisarProva() {
     setErro('');
     setAnaliseId(null);
     setProcessando(true);
+
+    setProgresso('Consultando o que já foi classificado antes…');
+    const todas = documentosSelecionados.flatMap((doc) => doc.questoes);
+    const cache = await aplicarCache(todas);
+    if (cache.aplicadas) {
+      setDocumentos((atuais) => [...atuais]);   // força o re-render
+      setProgresso(`${cache.aplicadas} reaproveitadas do cache.`);
+    }
+
+    const itens = todas.filter((questao) => !questao.classificacao);
+      if (!itens.length) {
+        setErro(`Tudo já estava classificado — ${cache.aplicadas} vieram do cache, sem chamar a IA.`);
+      return;
+    }
+    
     try {
       const itens = documentosSelecionados
         .flatMap((doc) => doc.questoes)

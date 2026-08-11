@@ -1,4 +1,5 @@
 import { supabase } from '../supabaseClient';
+import { taxonomiaParaPrompt } from './taxonomiaFatec';
 
 // O limite que derruba a classificação não é requisições por minuto, é TOKENS
 // por minuto. No free tier do Groq o teto costuma ser ~6.000 TPM: um único
@@ -8,9 +9,9 @@ import { supabase } from '../supabaseClient';
 // itens, e existe um acelerador de janela móvel que segura a chamada antes de
 // estourar em vez de esperar o 429 chegar.
 
-const TETO_TPM = 5000;            // margem sob os 6.000 do free tier
-const TOKENS_POR_LOTE = 1400;     // texto das questões por requisição
-const MAX_ITENS_LOTE = 6;         // teto da Edge Function é 8
+const TETO_TPM = 2500;            // margem sob os 6.000 do free tier
+const TOKENS_POR_LOTE = 900;     // texto das questões por requisição
+const MAX_ITENS_LOTE = 4;         // teto da Edge Function é 8
 const MAX_CHARS_QUESTAO = 1100;   // classificar não precisa do enunciado inteiro
 const MAX_TENTATIVAS = 5;
 const ESPERA_MAXIMA_MS = 70_000;
@@ -147,11 +148,25 @@ export async function classificarQuestoesIA(questoes, materias = [], onProgresso
   const lotes = montarLotes(questoes);
   const catalogo = enxugarCatalogo(materias);
   const custoCatalogo = estimarTokens(JSON.stringify(catalogo));
+  
 
   const classificacoes = [];
   const falhas = [];
   let interrompido = false;
   let erroFinal = null;
+
+  const resposta = await invocarIA({
+  acao: 'classificar_questoes',
+  materias: catalogo,
+  taxonomia: taxonomiaParaPrompt(),
+  contextoProva: contexto || null,
+  questoes: lote.map((q) => ({
+    id: q.id,
+    texto: q._texto,
+    topico: q.topico,
+    materiaConhecida: q.materiaConhecida || null,
+    dependeDeVisual: q.dependeDeVisual || false,
+  })),
 
   for (let i = 0; i < lotes.length; i += 1) {
     const lote = lotes[i];

@@ -66,11 +66,19 @@ Todas exigem sessão autenticada e derivam o dono de `auth.uid()`.
 
 ```bash
 supabase secrets set GROQ_API_KEY=SUA_CHAVE
+supabase secrets set GEMINI_API_KEY=SUA_CHAVE
+supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant
+supabase secrets set GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b
+supabase secrets set GEMINI_MODEL=gemini-3.5-flash-lite
 supabase secrets set ALLOWED_ORIGINS=http://localhost:5173,https://seu-dominio.com
 supabase functions deploy ia
 ```
 
 Não use `--no-verify-jwt`.
+
+As chaves de Groq e Gemini pertencem à Edge Function. Não use prefixo `VITE_` e não as coloque em `.env`,
+GitHub Pages ou código React. `GROQ_MODEL` antigo continua aceito como preferência, mas os nomes separados
+acima permitem fallback automático entre Llama e GPT-OSS.
 
 ## Reversão
 

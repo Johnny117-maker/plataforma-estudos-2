@@ -132,6 +132,9 @@ export function serializarDocumentos(documentos) {
         topico: q.topico,
         facilidade: q.facilidade,
         apoio: q.apoio?.map((a) => a.rotulo) || [],
+        visual_analisado: Boolean(q.visualAnalisado),
+        descricao_visual: q.descricaoVisual || null,
+        modelo_visual: q.modeloVisual || null,
       },
     })),
   }));

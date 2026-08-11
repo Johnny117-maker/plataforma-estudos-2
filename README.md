@@ -10,15 +10,16 @@ Esta versão inclui:
 - cronogramas em lista, Kanban, calendário e timeline;
 - criação, importação, duplicação e reorganização atômicas;
 - perguntas de múltipla escolha, verdadeiro/falso e dissertativas;
-- upload simultâneo de até 20 provas PDF, DOCX, TXT ou Markdown;
-- extração local, seleção por arquivo e por conteúdo, classificação em lotes por IA e cruzamento de assuntos;
+- upload simultâneo de até 20 provas PDF, DOCX, TXT, Markdown ou imagem;
+- extração local, OCR/leitura visual seletiva, classificação híbrida em lotes e cruzamento de assuntos;
 - combinação de questões, trechos extraídos e conteúdos complementares de uma ou várias provas;
 - persistência de documentos, questões classificadas e frequências;
 - geração automática de cronograma com prioridade baseada na recorrência;
 - notas hierárquicas em blocos;
 - RLS, integridade multiusuário, testes, lint, CI e carregamento por rota.
 
-PDFs compostos apenas por imagens ainda exigem OCR externo; o sistema os identifica e não envia conteúdo vazio para a IA.
+PDFs digitalizados e imagens usam OCR nativo do Gemini. PDFs com texto permanecem no navegador e somente
+questões que citam gráfico, tabela, mapa ou figura são enviadas para leitura visual.
 
 ## Arquitetura
 
@@ -28,11 +29,13 @@ flowchart TD
   UI --> SDK[Supabase SDK]
   SDK --> DB[PostgreSQL + RLS + RPCs]
   SDK --> EDGE[Edge Function IA]
-  EDGE --> GROQ[Groq API]
+  EDGE --> GROQ[Groq: Llama + GPT-OSS]
+  EDGE --> GEMINI[Gemini: OCR e visão]
 ```
 
 - O navegador extrai e segmenta os documentos.
-- A Edge Function recebe lotes pequenos e mantém a chave da Groq no servidor.
+- A Edge Function alterna lotes entre os modelos da Groq e mantém as chaves privadas no servidor.
+- O Gemini recebe somente arquivos que precisam de OCR ou interpretação visual; o arquivo temporário é removido após a resposta.
 - Operações com várias inserções são executadas por funções PostgreSQL transacionais.
 - O frontend nunca escolhe o `user_id` usado pelas RPCs; ele é obtido de `auth.uid()`.
 
@@ -42,7 +45,7 @@ flowchart TD
 - npm 10+
 - projeto Supabase
 - Supabase CLI para aplicar migrações e publicar a função
-- chave de API Groq para as funções de IA
+- chaves gratuitas da Groq e do Google AI Studio para as funções de IA
 
 ## Instalação
 
@@ -58,7 +61,7 @@ VITE_SUPABASE_URL=https://SEU_PROJETO.supabase.co
 VITE_SUPABASE_ANON_KEY=SUA_CHAVE_ANON_PUBLIC
 ```
 
-Nunca coloque `service_role`, `GROQ_API_KEY` ou qualquer chave privada no `.env` do frontend.
+Nunca coloque `service_role`, `GROQ_API_KEY`, `GEMINI_API_KEY` ou qualquer chave privada no `.env` do frontend.
 
 ## Banco de dados
 
@@ -84,9 +87,16 @@ Configure os segredos e publique:
 
 ```bash
 supabase secrets set GROQ_API_KEY=SUA_CHAVE
+supabase secrets set GEMINI_API_KEY=SUA_CHAVE
+supabase secrets set GROQ_LLAMA_MODEL=llama-3.1-8b-instant
+supabase secrets set GROQ_GPT_OSS_MODEL=openai/gpt-oss-20b
+supabase secrets set GEMINI_MODEL=gemini-3.5-flash-lite
 supabase secrets set ALLOWED_ORIGINS=https://seu-dominio.com
 supabase functions deploy ia
 ```
+
+`llama-3.1-8b-instant` está programado para ser desativado pela Groq em 16/08/2026. O código já tenta
+`openai/gpt-oss-20b` automaticamente quando o Llama falha, portanto a aplicação continua funcionando.
 
 `ALLOWED_ORIGINS` aceita uma lista separada por vírgulas. A verificação JWT permanece habilitada.
 
@@ -153,7 +163,7 @@ O `base` do Vite está configurado como `/plataforma-estudos/`. Ajuste `vite.con
 
 ## Limitações conhecidas
 
-- Sem OCR integrado para PDFs digitalizados.
 - A classificação depende da disponibilidade e da cota do provedor de IA.
-- Questões que dependem de imagens, gráficos ou tabelas são marcadas para revisão humana.
+- Se a cota gratuita do Gemini acabar, PDFs com texto continuam funcionando; PDFs escaneados ficam pendentes até a cota voltar.
+- A leitura visual é uma interpretação automática e deve ser revisada quando a classificação vier com confiança baixa.
 - A migração precisa ser validada em um projeto Supabase de homologação antes de ser aplicada ao banco principal.

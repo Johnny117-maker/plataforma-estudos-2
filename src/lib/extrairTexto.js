@@ -13,7 +13,7 @@ function extensaoDe(nome) {
   return m ? m[1].toLowerCase() : '';
 }
 
-function comoLinhas(texto) {
+export function criarLinhasDeTexto(texto) {
   return texto
     .replace(/\r\n?/g, '\n')
     .split('\n')
@@ -25,7 +25,7 @@ async function extrairDocx(arquivo) {
   const mammoth = mod.default || mod;
   const buffer = await arquivo.arrayBuffer();
   const { value } = await mammoth.extractRawText({ arrayBuffer: buffer });
-  return comoLinhas(String(value || ''));
+  return criarLinhasDeTexto(String(value || ''));
 }
 
 /**
@@ -57,11 +57,16 @@ export async function extrairDeArquivo(arquivo, onProgresso) {
     linhas = await extrairDocx(arquivo);
   } else if (ext === 'txt' || ext === 'md' || ext === 'text') {
     tipo = 'txt';
-    linhas = comoLinhas(await arquivo.text());
+    linhas = criarLinhasDeTexto(await arquivo.text());
+  } else if (['png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'].includes(ext)) {
+    // Imagens não possuem uma camada de texto. A página de análise reconhece
+    // este sinal e envia o arquivo ao Gemini para OCR/leitura visual.
+    tipo = 'imagem';
+    linhas = [];
   } else if (ext === 'doc') {
     throw new Error('Arquivos .doc (Word antigo) nao sao suportados. Salve como .docx ou .pdf.');
   } else {
-    throw new Error(`Formato nao suportado: .${ext || '???'}. Use PDF, DOCX ou TXT.`);
+    throw new Error(`Formato nao suportado: .${ext || '???'}. Use PDF, DOCX, TXT ou imagem.`);
   }
 
   const totalCaracteres = linhas.reduce((s, l) => s + l.texto.length, 0);
@@ -74,6 +79,7 @@ export async function extrairDeArquivo(arquivo, onProgresso) {
     moldura,
     paginasComColuna,
     provavelDigitalizado:
-      tipo === 'pdf' && totalCaracteres / Math.max(1, totalPaginas) < MINIMO_CHARS_POR_PAGINA,
+      tipo === 'imagem'
+      || (tipo === 'pdf' && totalCaracteres / Math.max(1, totalPaginas) < MINIMO_CHARS_POR_PAGINA),
   };
 }

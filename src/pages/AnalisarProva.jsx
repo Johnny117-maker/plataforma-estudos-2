@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
-import { extrairDeArquivo } from '../lib/extrairTexto';
-import { classificarQuestoesIA } from '../lib/iaService';
+import { criarLinhasDeTexto, extrairDeArquivo } from '../lib/extrairTexto';
+import {
+  classificarQuestoesIA,
+  descreverQuestoesVisuaisGemini,
+  extrairDocumentoVisualGemini,
+} from '../lib/iaService';
 import {
   criarBlocosDeConteudo,
   cruzarFrequencias,
@@ -13,6 +17,7 @@ import {
 import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
 import { aplicarCache } from '../lib/cacheClassificacao';
+import { aplicarDescricoesVisuais } from '../lib/documentoVisual';
 import { gerarCronogramaDaAnalise, salvarAnaliseProvas } from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
@@ -134,83 +139,120 @@ export default function AnalisarProva() {
         if (hashes.has(hash)) continue;
         hashes.add(hash);
 
-        const extracao = await extrairDeArquivo(file, (p, t) => setProgresso(`${file.name}: página ${p}/${t}`));
-        if (extracao.provavelDigitalizado) {
+        try {
+          const extracao = await extrairDeArquivo(
+            file,
+            (p, t) => setProgresso(`${file.name}: página ${p}/${t}`)
+          );
+          let linhasFonte = extracao.linhas;
+          let usouGeminiOcr = false;
+          let modeloVisual = null;
+
+          if (extracao.provavelDigitalizado) {
+            setProgresso(`${file.name}: executando OCR e leitura visual com Gemini…`);
+            const ocr = await extrairDocumentoVisualGemini(file);
+            linhasFonte = criarLinhasDeTexto(ocr.texto);
+            usouGeminiOcr = true;
+            modeloVisual = ocr.modelo;
+          }
+
+          // O rótulo "Questão NN" pode vir desenhado em fragmentos separados.
+          const { linhas: linhasLimpas } = limparLinhas(linhasFonte);
+          const { linhas, religadas } = religarCabecalhos(linhasLimpas);
+          const seg = segmentarQuestoes(linhas, perfil);
+          const prefixo = hash.slice(0, 12);
+          let questoesDetectadas = seg.questoes.map((questao, indice) => ({
+            ...questao,
+            id: `${prefixo}-questao-${questao.numero}-${indice}`,
+            origem: 'questao_detectada',
+            selecionada: true,
+            visualAnalisado: usouGeminiOcr && questao.dependeDeVisual,
+            modeloVisual: usouGeminiOcr && questao.dependeDeVisual ? modeloVisual : null,
+          }));
+          let avisos = [...seg.avisos];
+
+          const numerosVisuais = questoesDetectadas
+            .filter((questao) => questao.dependeDeVisual && !questao.visualAnalisado)
+            .map((questao) => questao.numero);
+          if (extracao.tipo === 'pdf' && numerosVisuais.length) {
+            try {
+              setProgresso(`${file.name}: analisando ${numerosVisuais.length} figura(s) com Gemini…`);
+              const descricoes = await descreverQuestoesVisuaisGemini(file, numerosVisuais);
+              const enriquecido = aplicarDescricoesVisuais(questoesDetectadas, descricoes);
+              questoesDetectadas = enriquecido.questoes;
+              if (enriquecido.aplicadas) {
+                avisos = avisos.filter((texto) => !texto.includes('O texto sozinho pode não bastar'));
+                avisos.push(`${enriquecido.aplicadas} questão(ões) tiveram gráficos, tabelas ou figuras descritos pelo Gemini.`);
+              }
+            } catch (visualError) {
+              avisos.push(`Análise visual indisponível: ${visualError.message}. O texto extraído foi mantido.`);
+            }
+          }
+
+          const questoes = questoesDetectadas.length
+            ? questoesDetectadas
+            : criarBlocosDeConteudo(linhas, prefixo);
+          if (usouGeminiOcr) {
+            avisos.unshift(`OCR e leitura visual realizados com ${modeloVisual}.`);
+          }
+          if (religadas) {
+            avisos.push(`${religadas} cabeçalho(s) de questão remontados a partir de fragmentos separados.`);
+          }
+          if (!questoesDetectadas.length && questoes.length) {
+            avisos.push('A numeração não foi reconhecida; o texto foi dividido em trechos selecionáveis.');
+          }
+
+          // Cadernos antigos declaram a matéria de cada bloco. Onde existe, a
+          // matéria é travada e a Groq classifica apenas o assunto granular.
+          if (questoesDetectadas.length) {
+            const { porNumero, areas } = mapearAreas(linhas, questoesDetectadas);
+            if (areas.length) {
+              const comArea = aplicarAreas(questoesDetectadas, porNumero, materias);
+              for (const questao of questoesDetectadas) {
+                if (questao.classificacao?.origem === 'cabecalho_de_area') {
+                  questao.materiaConhecida = questao.classificacao.materia_nome;
+                  questao.classificacao = null;
+                }
+              }
+              avisos.push(`${comArea} de ${questoesDetectadas.length} questão(ões) tiveram a matéria confirmada pelos ${areas.length} cabeçalhos de área do caderno.`);
+            }
+          }
+
+          const contexto = detectarContextoProva(linhas);
+          if (contexto) avisos.push('Prova temática: o tema do caderno será informado à IA como contexto.');
+
           saida.push({
             nome: file.name,
             tipo: extracao.tipo,
             tamanho: file.size,
             totalPaginas: extracao.totalPaginas,
             hash,
+            texto: linhas.map((linha) => linha.texto).join('\n'),
+            perfil: seg.perfilUsado,
+            contexto,
+            selecionado: true,
+            avisos,
+            questoes,
+            modeloVisual,
+          });
+        } catch (fileError) {
+          // Um PDF corrompido ou uma cota temporariamente indisponível não
+          // impede os demais arquivos do mesmo lote de serem processados.
+          saida.push({
+            nome: file.name,
+            tipo: file.type || 'arquivo',
+            tamanho: file.size,
+            totalPaginas: 0,
+            hash,
             texto: '',
             perfil,
             contexto: null,
             selecionado: false,
-            avisos: ['PDF digitalizado: OCR necessário antes de selecionar conteúdo.'],
+            avisos: [],
             questoes: [],
-            erro: 'Sem texto embutido',
+            erro: fileError.message,
           });
-          continue;
         }
-
-        // O rótulo "Questão NN" é desenhado como dois fragmentos separados por
-        // um vão de ~13pt. Quando o corte XY cai nesse vão — acontece em página
-        // de duas colunas — saem duas linhas e a questão some sem erro nenhum.
-        const { linhas: linhasLimpas } = limparLinhas(extracao.linhas);
-        const { linhas, religadas } = religarCabecalhos(linhasLimpas);
-
-        const seg = segmentarQuestoes(linhas, perfil);
-        const prefixo = hash.slice(0, 12);
-        const questoesDetectadas = seg.questoes.map((questao, indice) => ({
-          ...questao,
-          id: `${prefixo}-questao-${questao.numero}-${indice}`,
-          origem: 'questao_detectada',
-          selecionada: true,
-        }));
-        const questoes = questoesDetectadas.length
-          ? questoesDetectadas
-          : criarBlocosDeConteudo(linhas, prefixo);
-
-        const avisos = [...seg.avisos];
-        if (religadas) {
-          avisos.push(`${religadas} cabeçalho(s) de questão remontados a partir de fragmentos separados.`);
-        }
-        if (!questoesDetectadas.length && questoes.length) {
-          avisos.push('A numeração não foi reconhecida; o texto foi dividido em trechos selecionáveis.');
-        }
-
-        // Cadernos até 2020 declaram a matéria de cada bloco. Onde existe, a
-        // matéria é travada e a IA gasta o raciocínio só no assunto granular.
-        if (questoesDetectadas.length) {
-          const { porNumero, areas } = mapearAreas(linhas, questoesDetectadas);
-          if (areas.length) {
-            const comArea = aplicarAreas(questoesDetectadas, porNumero, materias);
-            for (const questao of questoesDetectadas) {
-              if (questao.classificacao?.origem === 'cabecalho_de_area') {
-                questao.materiaConhecida = questao.classificacao.materia_nome;
-                questao.classificacao = null;
-              }
-            }
-            avisos.push(`${comArea} de ${questoesDetectadas.length} questão(ões) tiveram a matéria confirmada pelos ${areas.length} cabeçalhos de área do caderno.`);
-          }
-        }
-
-        const contexto = detectarContextoProva(linhas);
-        if (contexto) avisos.push('Prova temática: o tema do caderno será informado à IA como contexto.');
-
-        saida.push({
-          nome: file.name,
-          tipo: extracao.tipo,
-          tamanho: file.size,
-          totalPaginas: extracao.totalPaginas,
-          hash,
-          texto: linhas.map((linha) => linha.texto).join('\n'),
-          perfil: seg.perfilUsado,
-          contexto,
-          selecionado: true,
-          avisos,
-          questoes,
-        });
       }
 
       if (!saida.length) setErro('Os arquivos escolhidos já foram adicionados.');
@@ -441,8 +483,8 @@ export default function AnalisarProva() {
       <h2>Montar cronograma a partir de provas</h2>
       <p className="page-description">
         Envie um ou vários arquivos, escolha exatamente quais questões ou trechos devem entrar e gere um
-        cronograma baseado somente no conteúdo selecionado. A extração acontece no navegador; os PDFs
-        originais não são enviados à IA.
+        cronograma baseado somente no conteúdo selecionado. PDFs com texto são extraídos no navegador;
+        somente arquivos digitalizados ou questões com elementos visuais são enviados ao Gemini.
       </p>
 
       <div className="toolbar responsive-toolbar">
@@ -468,11 +510,11 @@ export default function AnalisarProva() {
           hidden
           multiple
           type="file"
-          accept=".pdf,.docx,.txt,.md"
+          accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.heic,.heif"
           onChange={(event) => processar(event.target.files)}
         />
         <strong>Clique ou arraste uma ou várias provas</strong>
-        <span>PDF, DOCX, TXT ou Markdown · até {MAX_ARQUIVOS} arquivos · 25 MB por arquivo</span>
+        <span>PDF, DOCX, TXT, Markdown ou imagem · até {MAX_ARQUIVOS} arquivos · 25 MB por arquivo</span>
       </div>
 
       {processando && <div className="empty-state">{progresso || 'Processando…'}</div>}
@@ -553,7 +595,8 @@ export default function AnalisarProva() {
                                 </label>
                                 <div className="content-badges">
                                   {item.pagina && <span>Página {item.pagina}</span>}
-                                  {item.dependeDeVisual && <span>depende de figura</span>}
+                                  {item.dependeDeVisual && !item.visualAnalisado && <span>depende de figura</span>}
+                                  {item.visualAnalisado && <span>visual analisado pelo Gemini</span>}
                                   {item.materiaConhecida && !item.classificacao && (
                                     <span>{item.materiaConhecida} · do caderno</span>
                                   )}

@@ -1,24 +1,20 @@
 import { supabase } from '../supabaseClient';
 import { taxonomiaParaPrompt, normalizarPar } from './taxonomiaFatec';
 
-// O limite que derruba a classificação não é requisições por minuto, é TOKENS
-// por minuto. No free tier do Groq o teto costuma ser ~6.000 TPM: um único lote
-// de 5 questões com 2.500 caracteres cada já passava disso sozinho — era a
-// causa do 429 em cascata.
-//
-// Aqui o lote é montado por ORÇAMENTO DE TOKENS, não por contagem de itens, e
-// existe um acelerador de janela móvel que segura a chamada ANTES de estourar,
-// em vez de reagir ao 429 depois que ele chega.
-//
-// Confira seus limites reais em console.groq.com -> Settings -> Limits e
-// ajuste TETO_TPM para ~60% do valor de lá.
-
-const TETO_TPM = 2_500;
-const TOKENS_POR_LOTE = 900;
-const MAX_ITENS_LOTE = 4;          // o teto da Edge Function é 8
-const MAX_CHARS_QUESTAO = 1_100;   // classificar não precisa do enunciado inteiro
-const MAX_TENTATIVAS = 5;
+// Os limites gratuitos da Groq são separados por modelo. Alternar os lotes
+// permite usar a capacidade dos dois modelos sem disparar chamadas paralelas
+// nem transformar um 429 em uma cascata de novas tentativas.
+const MODELOS = {
+  llama: { preferencia: 'llama', tetoLocalTpm: 5_200 },
+  'gpt-oss': { preferencia: 'gpt-oss', tetoLocalTpm: 7_000 },
+};
+const TOKENS_POR_LOTE = 1_800;
+const MAX_ITENS_LOTE = 8;
+const MAX_CHARS_QUESTAO = 1_400;
+const MAX_TENTATIVAS = 2;
 const ESPERA_MAXIMA_MS = 70_000;
+const FIM_LLAMA_31 = Date.parse('2026-08-17T00:00:00Z');
+let proximoModelo = 0;
 
 function esperar(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,24 +25,23 @@ function estimarTokens(texto) {
   return Math.ceil(String(texto || '').length / 3.5);
 }
 
-// Janela móvel de 60s.
-const janela = [];
+// Cada modelo tem sua própria janela móvel de 60s.
+const janelas = new Map(Object.keys(MODELOS).map((modelo) => [modelo, []]));
 
-function tokensNaJanela() {
+function tokensNaJanela(modelo) {
+  const janela = janelas.get(modelo);
   const corte = Date.now() - 60_000;
   while (janela.length && janela[0].em < corte) janela.shift();
   return janela.reduce((soma, registro) => soma + registro.tokens, 0);
 }
 
-async function reservarTokens(tokens, onEspera) {
-  // O orçamento estimado de uma única chamada pode ultrapassar o teto local
-  // conservador por causa da taxonomia e do JSON de saída. Nesse caso,
-  // reservamos a janela inteira e fazemos uma chamada isolada. Sem esse limite,
-  // `janela[0]` fica indefinido e o processo quebra antes de chamar a IA.
-  const reserva = Math.min(TETO_TPM, Math.max(1, Math.ceil(tokens)));
+async function reservarTokens(modelo, tokens, onEspera) {
+  const janela = janelas.get(modelo);
+  const teto = MODELOS[modelo].tetoLocalTpm;
+  const reserva = Math.min(teto, Math.max(1, Math.ceil(tokens)));
 
   for (;;) {
-    if (tokensNaJanela() + reserva <= TETO_TPM) {
+    if (tokensNaJanela(modelo) + reserva <= teto) {
       janela.push({ em: Date.now(), tokens: reserva });
       return;
     }
@@ -88,7 +83,7 @@ async function invocarIA(body, { tentativa = 0, onEspera } = {}) {
       onEspera?.(Math.ceil(espera / 1_000));
       // O 429 prova que a janela local estava otimista: zera e recomeça a
       // contagem a partir de agora.
-      janela.length = 0;
+      janelas.forEach((registros) => { registros.length = 0; });
       await esperar(espera);
       return invocarIA(body, { tentativa: tentativa + 1, onEspera });
     }
@@ -105,7 +100,40 @@ async function invocarIA(body, { tentativa = 0, onEspera } = {}) {
 }
 
 export function perguntarIAJson(prompt, system, maxTokens) {
-  return invocarIA({ acao: 'gerar_json', prompt, system, maxTokens });
+  return invocarIA({ acao: 'gerar_json', prompt, system, maxTokens, modeloPreferido: 'gpt-oss' });
+}
+
+async function invocarGeminiComArquivo(arquivo, acao, campos = {}) {
+  const body = new FormData();
+  body.append('acao', acao);
+  body.append('arquivo', arquivo, arquivo.name);
+  Object.entries(campos).forEach(([chave, valor]) => {
+    body.append(chave, typeof valor === 'string' ? valor : JSON.stringify(valor));
+  });
+
+  const { data, error } = await supabase.functions.invoke('ia', { body });
+  if (error || data?.erro) {
+    const detalhe = error
+      ? await detalharErro(error)
+      : { mensagem: data.erro, status: null };
+    throw new Error(detalhe.mensagem || 'O Gemini não conseguiu analisar o documento.');
+  }
+  if (data?.resultado === undefined) throw new Error('O Gemini não retornou um resultado válido.');
+  return data.resultado;
+}
+
+export async function extrairDocumentoVisualGemini(arquivo) {
+  const resultado = await invocarGeminiComArquivo(arquivo, 'ocr_documento');
+  const texto = String(resultado?.texto || '').trim();
+  if (texto.length < 40) throw new Error('O OCR retornou pouco texto. Verifique a nitidez e a orientação do arquivo.');
+  return { texto, modelo: resultado.modelo || 'gemini-3.5-flash-lite' };
+}
+
+export async function descreverQuestoesVisuaisGemini(arquivo, numeros) {
+  const unicos = [...new Set(numeros.map(Number).filter((numero) => Number.isInteger(numero) && numero > 0))];
+  if (!unicos.length) return [];
+  const resultado = await invocarGeminiComArquivo(arquivo, 'descrever_visuais', { questoes: unicos });
+  return Array.isArray(resultado?.questoes) ? resultado.questoes : [];
 }
 
 // Lotes por orçamento de tokens: uma questão longa viaja sozinha, várias curtas
@@ -127,16 +155,6 @@ function montarLotes(questoes) {
   }
   if (atual.length) lotes.push(atual);
   return lotes;
-}
-
-// O catálogo viaja em toda requisição. Nove matérias com 50 assuntos cada
-// custavam mais tokens que as próprias questões.
-function enxugarCatalogo(materias, limiteAssuntos = 30) {
-  return materias.slice(0, 20).map((materia) => ({
-    id: materia.id,
-    nome: materia.nome,
-    assuntos: (materia.subgeneros || []).slice(0, limiteAssuntos).map((s) => ({ id: s.id, nome: s.nome })),
-  }));
 }
 
 /**
@@ -177,12 +195,11 @@ function normalizarClassificacoes(classificacoes) {
  *
  * Devolve { classificacoes, falhas, interrompido, erro }.
  */
-export async function classificarQuestoesIA(questoes, materias = [], onProgresso, onParcial, opcoes = {}) {
-  const { contextoProva = null } = opcoes;
+export async function classificarQuestoesIA(questoes, _materias = [], onProgresso, onParcial, opcoes = {}) {
+  const { contextoProva = null, modeloPreferido = null } = opcoes;
   const lotes = montarLotes(questoes);
-  const catalogo = enxugarCatalogo(materias);
   const taxonomia = taxonomiaParaPrompt();
-  const custoFixo = estimarTokens(JSON.stringify(catalogo)) + estimarTokens(taxonomia);
+  const custoFixo = estimarTokens(taxonomia);
 
   const classificacoes = [];
   const falhas = [];
@@ -194,19 +211,28 @@ export async function classificarQuestoesIA(questoes, materias = [], onProgresso
     const previsto = custoFixo
       + lote.reduce((soma, q) => soma + q._tokens, 0)
       + 300 + lote.length * 160;
+    let chaveModelo = modeloPreferido;
+    if (!MODELOS[chaveModelo]) {
+      chaveModelo = Date.now() < FIM_LLAMA_31 && proximoModelo % 2 === 0
+        ? 'llama'
+        : 'gpt-oss';
+      proximoModelo += 1;
+    }
 
-    await reservarTokens(previsto, (segundos) => {
-      onProgresso?.(i + 1, lotes.length, `Aguardando ${segundos}s para não estourar o limite da IA…`);
+    await reservarTokens(chaveModelo, previsto, (segundos) => {
+      onProgresso?.(i + 1, lotes.length,
+        `Aguardando ${segundos}s pelo limite do modelo ${chaveModelo}…`);
     });
 
-    onProgresso?.(i + 1, lotes.length, `Classificando lote ${i + 1} de ${lotes.length}`);
+    onProgresso?.(i + 1, lotes.length,
+      `Classificando lote ${i + 1} de ${lotes.length} com ${chaveModelo}`);
 
     try {
       const resposta = await invocarIA({
         acao: 'classificar_questoes',
-        materias: catalogo,
         taxonomia,
         contextoProva,
+        modeloPreferido: MODELOS[chaveModelo].preferencia,
         questoes: lote.map((questao) => ({
           id: questao.id,
           texto: questao._texto,

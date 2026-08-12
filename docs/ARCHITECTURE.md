@@ -13,15 +13,17 @@
 
 ```mermaid
 flowchart TD
-  A[Arquivos locais] --> B[Extração]
-  B --> C[Segmentação]
-  C --> D[Seleção e edição]
+  A[Provas e gabaritos] --> B[Extração]
+  B --> C[Questões e respostas]
+  C --> D[Seleção e revisão]
   D --> E[Job e snapshot]
   E --> F[Supabase Queue]
   F --> G[Worker e IAs]
   G --> H[Resultados persistidos]
   H --> I[Frequência por assunto]
   I --> J[Cronograma priorizado]
+  H --> K[Banco de questões]
+  K --> L[Testes futuros]
 ```
 
 Os arquivos originais não são enviados à classificação textual. O usuário escolhe arquivos e conteúdos individualmente. Questões reconhecidas, trechos automáticos e conteúdos complementares usam a mesma estrutura. A fila recebe somente o texto selecionado, limitado por tamanho e agrupado em lotes. PDFs digitalizados e elementos visuais continuam sendo enviados ao Gemini quando necessário.
@@ -33,6 +35,10 @@ Os arquivos originais não são enviados à classificação textual. O usuário 
 `analises_provas` possui muitos `documentos_prova`; cada documento possui muitas `questoes_extraidas`; as frequências agregadas ficam em `frequencias_assuntos`. Um `cronograma` pode referenciar a análise que o originou.
 
 `analise_jobs` guarda dono, modo, snapshot, estado e contadores. `analise_lotes` guarda payload, tentativas, provedor, modelo e resultado de cada unidade de trabalho. As tabelas da extensão `pgmq` não são expostas ao frontend.
+
+`provas_banco` registra a origem das perguntas publicadas. `gabarito_versoes` e `gabarito_itens`
+preservam correções e retificações sem sobrescrever a versão anterior. `testes` e `teste_questoes`
+guardam a composição de cada simulado; as respostas continuam em `historico_respostas`.
 
 ## Decisões de segurança
 

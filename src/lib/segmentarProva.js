@@ -157,12 +157,18 @@ function extrairPartes(corpo, perfil) {
   const fimAlternativas = iCom !== null ? iCom : corpo.length;
 
   const enunciado = corpo.slice(0, fimEnunciado).map((l) => l.texto).join('\n');
-  const alternativas = iAlt !== null ? corpo.slice(iAlt, fimAlternativas).map((l) => l.texto) : [];
+  const linhasAlternativas = iAlt !== null ? corpo.slice(iAlt, fimAlternativas) : [];
+  const alternativas = [];
+  for (const linha of linhasAlternativas) {
+    const inicio = perfil.alternativa.exec(linha.texto);
+    if (inicio) alternativas.push(linha.texto);
+    else if (alternativas.length) alternativas[alternativas.length - 1] += `\n${linha.texto}`;
+  }
   const comentario = iCom !== null ? corpo.slice(iCom).map((l) => l.texto).join('\n') : '';
 
   const letras = [];
-  for (const l of alternativas) {
-    const m = perfil.alternativa.exec(l);
+  for (const alternativa of alternativas) {
+    const m = perfil.alternativa.exec(alternativa);
     if (m) letras.push(m[1]);
   }
 

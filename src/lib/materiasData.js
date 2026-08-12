@@ -11,6 +11,11 @@ export const DEFAULT_MATERIAS = [
   { nome: 'História Geral', cor: '#A371F7', ordem: 6 },
   { nome: 'História Brasileira', cor: '#D96C82', ordem: 7 },
   { nome: 'Geografia', cor: '#8B5E3C', ordem: 8 },
+  { nome: 'Literatura', cor: '#C69026', ordem: 9 },
+  { nome: 'Inglês', cor: '#58A6FF', ordem: 10 },
+  { nome: 'Raciocínio Lógico', cor: '#DB6D28', ordem: 11 },
+  { nome: 'Sociologia', cor: '#BC8CFF', ordem: 12 },
+  { nome: 'Filosofia', cor: '#7D8590', ordem: 13 },
 ];
 
 // Assuntos (subgêneros) de Matemática, organizados em 3 blocos temáticos

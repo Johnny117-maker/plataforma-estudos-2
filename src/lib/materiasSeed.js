@@ -2,7 +2,7 @@ import { supabase } from '../supabaseClient';
 import { DEFAULT_MATERIAS } from './materiasData';
 
 /**
- * Cria as 9 matérias padrão (só as que ainda não existem, pelo nome).
+ * Cria as matérias padrão (só as que ainda não existem, pelo nome).
  * Pode chamar de novo sem medo — não duplica.
  */
 export async function seedMateriasPadrao(userId) {

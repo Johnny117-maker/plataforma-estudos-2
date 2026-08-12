@@ -1,25 +1,35 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { opcoesDaPergunta, respostaObjetivaCorreta } from '../lib/quizUtils';
 
 const LETRAS = ['a', 'b', 'c', 'd', 'e', 'f'];
 
-export default function Quiz({ perguntas, userId, onSair }) {
+export default function Quiz({ perguntas, userId, testeId = null, onFinalizar, onSair }) {
   const [indice, setIndice] = useState(0);
   const [respondida, setRespondida] = useState(null);
   const [texto, setTexto] = useState('');
   const [mostraModelo, setMostraModelo] = useState(false);
   const [acertos, setAcertos] = useState(0);
   const [erro, setErro] = useState('');
+  const inicioQuestaoRef = useRef(Date.now());
+  const finalizadoRef = useRef(false);
   const acabou = indice >= perguntas.length;
   const pergunta = perguntas[indice];
+
+  useEffect(() => {
+    if (!acabou || finalizadoRef.current) return;
+    finalizadoRef.current = true;
+    onFinalizar?.({ acertos, total: perguntas.length });
+  }, [acabou, acertos, onFinalizar, perguntas.length]);
 
   async function registrar(resposta, correta) {
     const { error } = await supabase.from('historico_respostas').insert({
       user_id: userId,
       pergunta_id: pergunta.id,
+      teste_id: testeId,
       resposta_dada: resposta,
       correta,
+      tempo_segundos: Math.max(0, Math.round((Date.now() - inicioQuestaoRef.current) / 1000)),
     });
     if (error) throw new Error(error.message);
     if (correta) setAcertos((valor) => valor + 1);
@@ -51,6 +61,7 @@ export default function Quiz({ perguntas, userId, onSair }) {
     setTexto('');
     setMostraModelo(false);
     setErro('');
+    inicioQuestaoRef.current = Date.now();
     setIndice((valor) => valor + 1);
   }
 
@@ -67,7 +78,16 @@ export default function Quiz({ perguntas, userId, onSair }) {
   return (
     <div className="card quiz-card">
       <div className="quiz-meta">Questão {indice + 1} de {perguntas.length} · {acertos} acerto(s)</div>
+      {(pergunta.fonte || pergunta.numero_original) && (
+        <div className="quiz-source">
+          {pergunta.fonte || 'Prova'}{pergunta.numero_original ? ` · questão ${pergunta.numero_original}` : ''}
+        </div>
+      )}
       <div className="quiz-question">{pergunta.enunciado}</div>
+      {pergunta.imagem_url && <img className="quiz-image" src={pergunta.imagem_url} alt="Elemento visual da questão" />}
+      {pergunta.possui_elemento_visual && pergunta.metadados?.descricao_visual && (
+        <div className="answer-review">Descrição do elemento visual: {pergunta.metadados.descricao_visual}</div>
+      )}
       {dissertativa ? (
         <div className="quiz-dissertativa">
           <textarea rows={5} value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="Escreva sua resposta…" disabled={mostraModelo} />

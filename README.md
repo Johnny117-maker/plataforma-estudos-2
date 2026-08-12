@@ -11,7 +11,10 @@ Esta versão inclui:
 - criação, importação, duplicação e reorganização atômicas;
 - perguntas de múltipla escolha, verdadeiro/falso e dissertativas;
 - upload simultâneo de até 20 provas PDF, DOCX, TXT ou Markdown;
+- upload separado de provas e gabaritos, vínculo automático por instituição/ano/semestre e correção manual;
 - extração local, seleção por arquivo e por conteúdo, classificação em lotes por IA e cruzamento de assuntos;
+- banco reutilizável com prevenção de duplicatas, origem da questão, versão do gabarito e fila de revisão;
+- simulados aleatórios, por prova, por matéria ou priorizando erros e questões ainda não respondidas;
 - combinação de questões, trechos extraídos e conteúdos complementares de uma ou várias provas;
 - persistência de documentos, questões classificadas e frequências;
 - geração automática de cronograma com prioridade baseada na recorrência;
@@ -84,6 +87,7 @@ As migrações são executadas em ordem:
 4. `202608110002_cache_classificacao.sql`: cache por hash das questões.
 5. `202608110003_cronograma_adaptativo.sql`: disponibilidade, prioridades, desempenho, revisões e RPCs adaptativas.
 6. `202608110004_analise_assincrona.sql`: jobs, lotes, Supabase Queue, RLS e RPCs do worker.
+7. `202608110005_banco_questoes_provas.sql`: provas, versões de gabarito, publicação de questões e testes persistentes.
 
 O primeiro arquivo copia `data_alvo` para `data_final` e `ritmo_horas_dia` para `horas_por_dia` antes de remover as colunas antigas. Se encontrar relações pertencentes a usuários diferentes, a migração para com uma mensagem em vez de alterar silenciosamente os dados.
 
@@ -125,16 +129,15 @@ npm run check
 
 1. Cadastre matérias e assuntos para melhorar a correspondência por IDs.
 2. Abra **Analisar múltiplas provas**.
-3. Envie de 1 a 20 arquivos, com até 25 MB cada. Novos envios são adicionados aos anteriores e arquivos duplicados são ignorados pelo hash.
-4. Marque os arquivos que deverão participar da análise.
-5. Abra **Revisar e escolher conteúdos** em cada arquivo.
-6. Marque uma ou várias questões/trechos, edite o texto quando necessário ou use **Adicionar conteúdo**.
-7. Escolha **Automático**, **Fila rápida** ou **Gemini Batch** e clique em **Classificar em segundo plano**.
-8. Confira a tabela cruzada de matéria, assunto, arquivos e frequência.
-9. Clique em **Salvar conteúdos selecionados**.
-10. Preencha o assistente: objetivo, disponibilidade e diagnóstico.
-11. Confira as quatro fases, revisões, simulados, carga e dias livres na prévia.
-12. Confirme para salvar tudo em uma única transação.
+3. Selecione **Próximo arquivo: prova** e envie os cadernos.
+4. Selecione **Próximo arquivo: gabarito** e envie os respectivos gabaritos.
+5. Confira o vínculo sugerido em cada prova e corrija respostas detectadas quando necessário.
+6. Abra **Revisar e escolher conteúdos** em cada arquivo.
+7. Marque uma ou várias questões/trechos, edite o texto quando necessário ou use **Adicionar conteúdo**.
+8. Escolha **Automático**, **Fila rápida** ou **Gemini Batch** e clique em **Classificar em segundo plano**.
+9. Resolva as pendências indicadas e clique em **Publicar no banco de questões**.
+10. Abra **Perguntas e respostas**, escolha prova/matéria/estratégia e gere um teste.
+11. Para o cronograma, salve os conteúdos e continue pelo assistente de planejamento.
 
 Quando a numeração das questões não é reconhecida, o texto é dividido automaticamente em trechos selecionáveis de até 3.000 caracteres. Somente os arquivos e conteúdos escolhidos são enviados para classificação e persistidos na análise; conteúdos desmarcados não influenciam a frequência nem o cronograma.
 
@@ -154,7 +157,7 @@ O frontend cria o job e pode ser fechado. Cada lote permanece na Supabase Queue 
 
 ## Segurança
 
-- Todas as 20 tabelas de usuário usam RLS forçado.
+- Todas as tabelas de usuário usam RLS forçado.
 - As views utilizam `security_invoker=true`.
 - Relações obrigatórias usam chaves compostas com `user_id`.
 - Relações opcionais são verificadas por trigger.

@@ -275,6 +275,18 @@ input:focus, select:focus, textarea:focus {
 .content-item textarea { width: 100%; margin-top: 9px; resize: vertical; min-height: 92px; line-height: 1.45; }
 .content-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; color: var(--muted); font-size: 10.5px; }
 .content-badges span { padding: 3px 7px; border-radius: 999px; background: var(--surface3); }
+.answer-key-document { border-left: 3px solid var(--gold); }
+.answer-key-link { margin-top: 12px; padding: 10px; border-radius: 8px; background: var(--surface2); display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.answer-key-link label, .question-bank-controls label:not(.toggle-inline) { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11px; }
+.answer-key-link select { min-width: 280px; }
+.answer-key-link small { color: var(--muted); padding-bottom: 9px; }
+.answer-key-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 7px; margin-top: 12px; }
+.answer-key-grid label { display: grid; grid-template-columns: 28px 52px 1fr; align-items: center; gap: 6px; padding: 7px; border-radius: 7px; background: var(--surface2); }
+.answer-key-grid label > span { color: var(--gold); font-family: 'JetBrains Mono', monospace; }
+.answer-key-grid small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.question-bank-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 9px; }
+.question-bank-controls .toggle-inline { min-height: 34px; }
+.bank-summary { border-left: 3px solid var(--success); }
 .selection-help { margin: -4px 0 14px; }
 .toggle-inline { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .toggle-inline input { accent-color: var(--gold); }
@@ -301,7 +313,9 @@ input:focus, select:focus, textarea:focus {
 .form-error { color: var(--danger); font-size: 12.5px; margin: 10px 0; }
 .quiz-card { max-width: 760px; }
 .quiz-meta { font-size: 11.5px; color: var(--muted); margin-bottom: 10px; }
+.quiz-source { display: inline-flex; margin-bottom: 9px; padding: 4px 8px; border-radius: 999px; background: var(--surface3); color: var(--gold); font-size: 10.5px; }
 .quiz-question { font-size: 14.5px; line-height: 1.6; margin-bottom: 16px; white-space: pre-wrap; }
+.quiz-image { display: block; max-width: 100%; max-height: 520px; object-fit: contain; margin: 0 auto 16px; border-radius: 8px; }
 .quiz-options, .quiz-dissertativa { display: flex; flex-direction: column; gap: 8px; }
 .quiz-option { text-align: left; padding: 11px 12px; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); cursor: pointer; }
 .quiz-option.correct { background: #123821; border-color: var(--success); }
@@ -322,6 +336,8 @@ input:focus, select:focus, textarea:focus {
   .document-grid { grid-template-columns: 1fr; }
   .selection-summary, .document-review-header, .content-item-header { align-items: stretch; flex-direction: column; }
   .content-badges { justify-content: flex-start; }
+  .answer-key-link, .question-bank-controls { align-items: stretch; flex-direction: column; }
+  .answer-key-link select { min-width: 0; width: 100%; }
   .responsive-toolbar, .responsive-form-row { align-items: stretch; flex-direction: column; }
   .responsive-toolbar > *, .responsive-form-row > * { width: 100%; }
   .analysis-job-list { grid-template-columns: 1fr; }

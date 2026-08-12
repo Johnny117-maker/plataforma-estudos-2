@@ -17,6 +17,14 @@ import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva'
 import { aplicarCache } from '../lib/cacheClassificacao';
 import { aplicarDescricoesVisuais } from '../lib/documentoVisual';
 import {
+  aplicarGabaritoNaProva,
+  detectarIdentidadeProva,
+  extrairItensGabarito,
+  prepararProvasParaBanco,
+  validarQuestaoParaBanco,
+  vincularGabaritosAutomaticamente,
+} from '../lib/bancoQuestoes';
+import {
   acordarWorkerAnalise,
   aplicarResultadosAoSnapshot,
   cancelarJobClassificacao,
@@ -28,7 +36,7 @@ import {
   STATUS_JOB_ATIVOS,
   STATUS_JOB_FINAIS,
 } from '../lib/analiseAssincrona';
-import { salvarAnaliseProvas } from '../lib/transactionService';
+import { publicarBancoQuestoes, salvarAnaliseProvas } from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
 const MAX_ARQUIVOS = 20;
@@ -87,6 +95,7 @@ export default function AnalisarProva() {
   const inputRef = useRef(null);
   const resultadoCarregadoRef = useRef(null);
   const [perfil, setPerfil] = useState('auto');
+  const [tipoUpload, setTipoUpload] = useState('prova');
   const [modoProcessamento, setModoProcessamento] = useState('auto');
   const [usarGroq, setUsarGroq] = useState(false);
   const [documentos, setDocumentos] = useState([]);
@@ -151,7 +160,12 @@ export default function AnalisarProva() {
   const documentosSelecionados = useMemo(() => filtrarSelecao(documentos), [documentos]);
   const selecao = useMemo(() => resumirSelecao(documentos), [documentos]);
   const frequencias = useMemo(() => cruzarFrequencias(documentosSelecionados), [documentosSelecionados]);
-  const totalExtraido = documentos.reduce((soma, doc) => soma + doc.questoes.length, 0);
+  const totalExtraido = documentos.reduce((soma, doc) => soma + (doc.questoes?.length || 0), 0);
+  const gabaritos = documentos.filter((doc) => doc.papel === 'gabarito');
+  const resumoBanco = useMemo(
+    () => prepararProvasParaBanco(documentos, materias, nome, analiseId),
+    [documentos, materias, nome, analiseId]
+  );
   const semClassificacao = selecao.conteudos - selecao.classificados;
   const baixaConfianca = documentosSelecionados
     .flatMap((doc) => doc.questoes)
@@ -164,6 +178,7 @@ export default function AnalisarProva() {
 
   async function processar(files) {
     const lista = [...files];
+    const papelUpload = tipoUpload;
     const vagas = MAX_ARQUIVOS - documentos.length;
     setErro('');
     setAviso('');
@@ -206,6 +221,34 @@ export default function AnalisarProva() {
             modeloVisual = ocr.modelo;
           }
 
+          const textoDocumento = linhasFonte.map((linha) => linha.texto).join('\n');
+          const metadadosProva = detectarIdentidadeProva(textoDocumento, file.name);
+
+          if (papelUpload === 'gabarito') {
+            const gabarito = extrairItensGabarito(linhasFonte);
+            saida.push({
+              nome: file.name,
+              tipo: extracao.tipo,
+              papel: 'gabarito',
+              tamanho: file.size,
+              totalPaginas: extracao.totalPaginas,
+              hash,
+              texto: textoDocumento,
+              perfil: 'gabarito',
+              metadadosProva,
+              selecionado: false,
+              avisos: [
+                ...(usouGeminiOcr ? [`OCR do gabarito realizado com ${modeloVisual}.`] : []),
+                ...gabarito.avisos,
+              ],
+              gabaritoItens: gabarito.itens,
+              gabaritoRetificado: gabarito.retificado,
+              questoes: [],
+              modeloVisual,
+            });
+            continue;
+          }
+
           // O rótulo "Questão NN" pode vir desenhado em fragmentos separados.
           const { linhas: linhasLimpas } = limparLinhas(linhasFonte);
           const { linhas, religadas } = religarCabecalhos(linhasLimpas);
@@ -216,6 +259,7 @@ export default function AnalisarProva() {
             id: `${prefixo}-questao-${questao.numero}-${indice}`,
             origem: 'questao_detectada',
             selecionada: true,
+            incluirBanco: true,
             visualAnalisado: usouGeminiOcr && questao.dependeDeVisual,
             modeloVisual: usouGeminiOcr && questao.dependeDeVisual ? modeloVisual : null,
           }));
@@ -274,12 +318,16 @@ export default function AnalisarProva() {
           saida.push({
             nome: file.name,
             tipo: extracao.tipo,
+            papel: 'prova',
             tamanho: file.size,
             totalPaginas: extracao.totalPaginas,
             hash,
             texto: linhas.map((linha) => linha.texto).join('\n'),
             perfil: seg.perfilUsado,
             contexto,
+            metadadosProva,
+            gabaritoHash: null,
+            gabaritoVinculado: null,
             selecionado: true,
             avisos,
             questoes,
@@ -289,8 +337,9 @@ export default function AnalisarProva() {
           // Um PDF corrompido ou uma cota temporariamente indisponível não
           // impede os demais arquivos do mesmo lote de serem processados.
           saida.push({
-            nome: file.name,
-            tipo: file.type || 'arquivo',
+              nome: file.name,
+              tipo: file.type || 'arquivo',
+              papel: papelUpload,
             tamanho: file.size,
             totalPaginas: 0,
             hash,
@@ -306,7 +355,7 @@ export default function AnalisarProva() {
       }
 
       if (!saida.length) setErro('Os arquivos escolhidos já foram adicionados.');
-      else setDocumentos((atuais) => [...atuais, ...saida]);
+      else setDocumentos((atuais) => vincularGabaritosAutomaticamente([...atuais, ...saida]));
     } catch (error) {
       setErro(error.message);
     } finally {
@@ -319,6 +368,78 @@ export default function AnalisarProva() {
   function alterarDocumento(hash, atualizador) {
     invalidarAnalise();
     setDocumentos((atuais) => atuais.map((doc) => (doc.hash === hash ? atualizador(doc) : doc)));
+  }
+
+  function associarGabarito(hashProva, hashGabarito) {
+    invalidarAnalise();
+    setDocumentos((atuais) => {
+      const gabarito = atuais.find((doc) => doc.hash === hashGabarito && doc.papel === 'gabarito') || null;
+      return atuais.map((doc) => (doc.hash === hashProva ? aplicarGabaritoNaProva(doc, gabarito) : doc));
+    });
+  }
+
+  function atualizarItemGabarito(hashGabarito, numero, resposta) {
+    invalidarAnalise();
+    setDocumentos((atuais) => {
+      const original = atuais.find((doc) => doc.hash === hashGabarito && doc.papel === 'gabarito');
+      if (!original) return atuais;
+      const atualizado = {
+        ...original,
+        gabaritoItens: original.gabaritoItens.map((item) => (
+          item.numero === numero ? { ...item, resposta, retificada: true } : item
+        )),
+        gabaritoRetificado: true,
+      };
+      return atuais.map((doc) => {
+        if (doc.hash === hashGabarito) return atualizado;
+        return doc.gabaritoHash === hashGabarito ? aplicarGabaritoNaProva(doc, atualizado) : doc;
+      });
+    });
+  }
+
+  function corrigirRespostaQuestao(hashProva, numero, resposta) {
+    invalidarAnalise();
+    setDocumentos((atuais) => {
+      const prova = atuais.find((doc) => doc.hash === hashProva);
+      const hashGabarito = prova?.gabaritoHash;
+      const original = atuais.find((doc) => doc.hash === hashGabarito && doc.papel === 'gabarito');
+      if (original) {
+        const atualizado = {
+          ...original,
+          gabaritoItens: original.gabaritoItens.map((item) => (
+            item.numero === numero ? { ...item, resposta, retificada: true } : item
+          )),
+          gabaritoRetificado: true,
+        };
+        return atuais.map((doc) => {
+          if (doc.hash === hashGabarito) return atualizado;
+          return doc.gabaritoHash === hashGabarito ? aplicarGabaritoNaProva(doc, atualizado) : doc;
+        });
+      }
+      return atuais.map((doc) => {
+        if (doc.hash !== hashProva) return doc;
+        return {
+          ...doc,
+          gabaritoVinculado: doc.gabaritoVinculado ? {
+            ...doc.gabaritoVinculado,
+            retificado: true,
+            itens: doc.gabaritoVinculado.itens.map((item) => (
+              item.numero === numero ? { ...item, resposta, retificada: true } : item
+            )),
+          } : null,
+          questoes: doc.questoes.map((questao) => (
+            questao.numero === numero ? { ...questao, gabarito: resposta, gabaritoRetificado: true } : questao
+          )),
+        };
+      });
+    });
+  }
+
+  function alternarInclusaoBanco(hash, id, incluirBanco) {
+    alterarDocumento(hash, (doc) => ({
+      ...doc,
+      questoes: doc.questoes.map((questao) => (questao.id === id ? { ...questao, incluirBanco } : questao)),
+    }));
   }
 
   function selecionarDocumento(hash, selecionado) {
@@ -374,7 +495,9 @@ export default function AnalisarProva() {
 
   function removerDocumento(hash) {
     invalidarAnalise();
-    setDocumentos((atuais) => atuais.filter((doc) => doc.hash !== hash));
+    setDocumentos((atuais) => atuais
+      .filter((doc) => doc.hash !== hash)
+      .map((doc) => (doc.gabaritoHash === hash ? aplicarGabaritoNaProva(doc, null) : doc)));
   }
 
   function selecionarTodos(selecionada) {
@@ -487,6 +610,29 @@ export default function AnalisarProva() {
     }
   }
 
+  async function publicarNoBanco() {
+    setErro('');
+    setProcessando(true);
+    setProgresso('Publicando questões aprovadas no banco…');
+    try {
+      const payload = prepararProvasParaBanco(documentos, materias, nome, analiseId);
+      if (!payload.prontas) {
+        throw new Error('Nenhuma questão está pronta. Vincule o gabarito, classifique e resolva as pendências marcadas.');
+      }
+      const resultado = await publicarBancoQuestoes(nome, payload.provas);
+      setAviso(
+        `${resultado.questoes_inseridas || 0} questão(ões) adicionadas ao banco. `
+        + `${resultado.questoes_duplicadas || 0} duplicada(s) foram preservadas sem nova cópia. `
+        + `${payload.revisar || 0} continuam aguardando revisão.`
+      );
+    } catch (error) {
+      setErro(error.message);
+    } finally {
+      setProcessando(false);
+      setProgresso('');
+    }
+  }
+
   function exportar() {
     const blob = new Blob([
       JSON.stringify({ nome, documentos: serializarDocumentos(documentosSelecionados), frequencias }, null, 2),
@@ -501,14 +647,17 @@ export default function AnalisarProva() {
 
   return (
     <div>
-      <h2>Montar cronograma a partir de provas</h2>
+      <h2>Analisar provas e criar banco de questões</h2>
       <p className="page-description">
-        Envie um ou vários arquivos, escolha exatamente quais questões ou trechos devem entrar e gere um
-        cronograma baseado somente no conteúdo selecionado. PDFs com texto são extraídos no navegador;
-        somente arquivos digitalizados ou questões com elementos visuais são enviados ao Gemini.
+        Envie provas e seus gabaritos, confira cada associação e publique as questões aprovadas para simulados
+        futuros. A mesma análise também continua gerando um cronograma pelos assuntos mais frequentes.
       </p>
 
       <div className="toolbar responsive-toolbar">
+        <select value={tipoUpload} onChange={(event) => setTipoUpload(event.target.value)} aria-label="Tipo do próximo arquivo">
+          <option value="prova">Próximo arquivo: prova</option>
+          <option value="gabarito">Próximo arquivo: gabarito</option>
+        </select>
         <select value={perfil} onChange={(event) => setPerfil(event.target.value)} aria-label="Modelo de prova">
           {Object.entries(PERFIS).map(([id, item]) => <option key={id} value={id}>{item.rotulo}</option>)}
         </select>
@@ -551,9 +700,18 @@ export default function AnalisarProva() {
           accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp,.heic,.heif"
           onChange={(event) => processar(event.target.files)}
         />
-        <strong>Clique ou arraste uma ou várias provas</strong>
+        <strong>
+          {tipoUpload === 'gabarito'
+            ? 'Clique ou arraste um ou vários gabaritos'
+            : 'Clique ou arraste uma ou várias provas'}
+        </strong>
         <span>PDF, DOCX, TXT, Markdown ou imagem · até {MAX_ARQUIVOS} arquivos · 25 MB por arquivo</span>
       </div>
+
+      <p className="selection-help">
+        Escolha acima se o próximo arquivo é uma prova ou um gabarito. O sistema tenta relacionar os pares por
+        instituição, ano e semestre; você pode corrigir a associação antes de publicar.
+      </p>
 
       <p className="selection-help">
         O Flash-Lite classifica os lotes textuais; o Flash assume questões visuais e classificações ambíguas.
@@ -635,6 +793,51 @@ export default function AnalisarProva() {
 
           <div className="document-review-list">
             {documentos.map((doc) => {
+              if (doc.papel === 'gabarito') {
+                const identidade = [
+                  doc.metadadosProva?.instituicao,
+                  doc.metadadosProva?.ano,
+                  doc.metadadosProva?.semestre ? `${doc.metadadosProva.semestre}º semestre` : null,
+                ].filter(Boolean).join(' · ');
+                return (
+                  <article className="card document-review answer-key-document" key={doc.hash}>
+                    <div className="document-review-header">
+                      <div>
+                        <strong>{doc.nome}</strong>
+                        <small className="document-warning">
+                          Gabarito · {tamanho(doc.tamanho)} · {doc.gabaritoItens?.length || 0} resposta(s)
+                          {identidade ? ` · ${identidade}` : ''}
+                        </small>
+                      </div>
+                      <button className="btn btn-danger-text" type="button" onClick={() => removerDocumento(doc.hash)}>
+                        Remover arquivo
+                      </button>
+                    </div>
+                    {doc.erro && <span className="form-error">{doc.erro}</span>}
+                    {doc.avisos?.map((texto) => <small className="document-warning" key={texto}>{texto}</small>)}
+                    {!doc.erro && doc.gabaritoItens?.length > 0 && (
+                      <details className="content-review">
+                        <summary>Conferir respostas detectadas</summary>
+                        <div className="answer-key-grid">
+                          {doc.gabaritoItens.map((item) => (
+                            <label key={item.numero}>
+                              <span>{item.numero}</span>
+                              <select
+                                value={item.resposta}
+                                aria-label={`Resposta da questão ${item.numero}`}
+                                onChange={(event) => atualizarItemGabarito(doc.hash, item.numero, event.target.value)}
+                              >
+                                {['A', 'B', 'C', 'D', 'E'].map((letra) => <option key={letra}>{letra}</option>)}
+                              </select>
+                              {item.disciplina && <small>{item.disciplina}</small>}
+                            </label>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </article>
+                );
+              }
               const escolhidos = doc.questoes.filter(
                 (questao) => questao.selecionada !== false && String(questao.paraClassificar || '').trim()
               ).length;
@@ -662,6 +865,30 @@ export default function AnalisarProva() {
                   {doc.avisos?.map((texto) => <small className="document-warning" key={texto}>{texto}</small>)}
 
                   {!doc.erro && (
+                    <div className="answer-key-link">
+                      <label>
+                        <span>Gabarito desta prova</span>
+                        <select value={doc.gabaritoHash || ''} onChange={(event) => associarGabarito(doc.hash, event.target.value)}>
+                          <option value="">Ainda não vinculado</option>
+                          {gabaritos.map((gabarito) => (
+                            <option key={gabarito.hash} value={gabarito.hash}>
+                              {gabarito.nome} ({gabarito.gabaritoItens?.length || 0} respostas)
+                            </option>
+                          ))}
+                          {doc.gabaritoVinculado && !gabaritos.some((gabarito) => gabarito.hash === doc.gabaritoHash) && (
+                            <option value={doc.gabaritoHash}>{doc.gabaritoVinculado.nome} (restaurado)</option>
+                          )}
+                        </select>
+                      </label>
+                      {doc.gabaritoVinculado && (
+                        <small>
+                          {doc.questoes.filter((questao) => questao.gabarito).length}/{doc.questoes.length} questão(ões) receberam resposta.
+                        </small>
+                      )}
+                    </div>
+                  )}
+
+                  {!doc.erro && (
                     <details className="content-review" open={documentos.length === 1}>
                       <summary>Revisar e escolher conteúdos</summary>
                       <div className="button-row wrap compact-row">
@@ -674,6 +901,7 @@ export default function AnalisarProva() {
                         {doc.questoes.map((item, indice) => {
                           const conf = Number(item.classificacao?.confianca);
                           const duvidoso = item.classificacao && conf < 0.6;
+                          const validacaoBanco = validarQuestaoParaBanco(item, materias);
                           return (
                             <div className={`content-item${item.selecionada === false ? ' is-disabled' : ''}`} key={item.id}>
                               <div className="content-item-header">
@@ -687,6 +915,7 @@ export default function AnalisarProva() {
                                 </label>
                                 <div className="content-badges">
                                   {item.pagina && <span>Página {item.pagina}</span>}
+                                  {item.gabarito && <span>Gabarito {item.gabarito}{item.gabaritoRetificado ? ' · retificado' : ''}</span>}
                                   {item.dependeDeVisual && !item.visualAnalisado && <span>depende de figura</span>}
                                   {item.visualAnalisado && <span>visual analisado pelo Gemini</span>}
                                   {item.materiaConhecida && !item.classificacao && (
@@ -704,7 +933,32 @@ export default function AnalisarProva() {
                                       Excluir
                                     </button>
                                   )}
+                                  {item.incluirBanco !== false && (
+                                    <span style={validacaoBanco.pronta ? { color: 'var(--success)' } : { color: 'var(--danger)' }}>
+                                      {validacaoBanco.pronta ? 'pronta para o banco' : validacaoBanco.pendencias.join(' · ')}
+                                    </span>
+                                  )}
                                 </div>
+                              </div>
+                              <div className="question-bank-controls">
+                                <label>
+                                  <span>Resposta correta</span>
+                                  <select
+                                    value={item.gabarito || ''}
+                                    onChange={(event) => corrigirRespostaQuestao(doc.hash, item.numero, event.target.value)}
+                                  >
+                                    <option value="">Não encontrada</option>
+                                    {['A', 'B', 'C', 'D', 'E'].map((letra) => <option key={letra}>{letra}</option>)}
+                                  </select>
+                                </label>
+                                <label className="toggle-inline">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.incluirBanco !== false}
+                                    onChange={(event) => alternarInclusaoBanco(doc.hash, item.id, event.target.checked)}
+                                  />
+                                  <span>Incluir no banco de questões</span>
+                                </label>
                               </div>
                               <textarea
                                 rows="5"
@@ -723,6 +977,17 @@ export default function AnalisarProva() {
             })}
           </div>
 
+          <div className="selection-summary card bank-summary">
+            <div>
+              <strong>Banco de questões</strong>
+              <span>
+                {resumoBanco.prontas} pronta(s) para simulados · {resumoBanco.revisar} aguardando gabarito,
+                classificação ou revisão visual.
+              </span>
+            </div>
+            <span>{resumoBanco.provas.length} prova(s) com questões aprováveis</span>
+          </div>
+
           <div className="button-row wrap">
             <button className="btn btn-primary" onClick={classificar} disabled={processando || !selecao.conteudos}>
               {semClassificacao
@@ -731,6 +996,9 @@ export default function AnalisarProva() {
             </button>
             <button className="btn" onClick={salvar} disabled={processando || !selecao.conteudos}>
               Salvar conteúdos selecionados
+            </button>
+            <button className="btn btn-primary" onClick={publicarNoBanco} disabled={processando || !resumoBanco.prontas}>
+              Publicar {resumoBanco.prontas} no banco de questões
             </button>
             <button className="btn" onClick={exportar} disabled={!selecao.conteudos}>Exportar seleção JSON</button>
           </div>

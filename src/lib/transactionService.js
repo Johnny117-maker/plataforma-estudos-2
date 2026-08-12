@@ -22,6 +22,22 @@ export function salvarAnaliseProvas(nome, documentos) {
   return rpc('salvar_analise_provas', { p_nome: nome, p_documentos: documentos });
 }
 
+export function publicarBancoQuestoes(nome, provas) {
+  return rpc('publicar_banco_questoes', { p_nome: nome, p_provas: provas });
+}
+
+export function criarTesteBanco(titulo, perguntas, criterios = {}) {
+  return rpc('criar_teste_banco', {
+    p_titulo: titulo,
+    p_perguntas: perguntas.map((pergunta) => pergunta.id),
+    p_criterios: criterios,
+  });
+}
+
+export function concluirTesteBanco(testeId) {
+  return rpc('concluir_teste_banco', { p_teste_id: testeId });
+}
+
 export function gerarCronogramaDaAnalise(analiseId, dataInicio, dataFinal, horasPorDia) {
   return rpc('gerar_cronograma_da_analise', {
     p_analise_id: analiseId,

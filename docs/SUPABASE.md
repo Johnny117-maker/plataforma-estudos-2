@@ -21,6 +21,7 @@
 - instala RPCs transacionais.
 - adiciona disponibilidade semanal, prioridades, desempenho, revisões e reorganização adaptativa.
 - adiciona jobs, lotes, Supabase Queue e retomada automática da classificação.
+- adiciona provas publicadas, versões de gabarito, questões com origem e testes persistentes.
 
 As colunas antigas `data_alvo` e `ritmo_horas_dia` são removidas somente depois da cópia dos valores.
 
@@ -66,6 +67,9 @@ Teste com dois usuários diferentes. Cada usuário deve enxergar somente seus pr
 | `aplicar_reorganizacao_adaptativa` | Move apenas tarefas pendentes e não fixas, guardando histórico |
 | `criar_job_classificacao` | Cria job, snapshot, lotes e mensagens em uma transação |
 | `cancelar_job_classificacao` | Cancela somente jobs pertencentes ao usuário autenticado |
+| `publicar_banco_questoes` | Publica somente questões validadas, converte A–E em índice e ignora duplicatas |
+| `criar_teste_banco` | Salva a composição ordenada de um teste usando perguntas do próprio usuário |
+| `concluir_teste_banco` | Consolida acertos e percentual do teste |
 
 Todas exigem sessão autenticada e derivam o dono de `auth.uid()`.
 

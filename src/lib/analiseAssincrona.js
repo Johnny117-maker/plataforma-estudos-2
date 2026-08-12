@@ -5,6 +5,14 @@ export const LIMITE_BATCH_AUTOMATICO = 800;
 export const STATUS_JOB_ATIVOS = ['pendente', 'processando', 'aguardando_batch'];
 export const STATUS_JOB_FINAIS = ['concluido', 'concluido_com_falhas', 'falhou', 'cancelado'];
 
+export function filtrarJobsAtivos(jobs = []) {
+  return jobs.filter((job) => STATUS_JOB_ATIVOS.includes(job.status));
+}
+
+export function filtrarJobsFinalizados(jobs = []) {
+  return jobs.filter((job) => STATUS_JOB_FINAIS.includes(job.status));
+}
+
 const MAX_ITENS_TEXTO = 24;
 const MAX_ITENS_VISUAL = 12;
 const MAX_CHARS_TEXTO = 30_000;
@@ -168,8 +176,21 @@ export async function listarJobsClassificacao(limite = 6) {
   const { data, error } = await supabase
     .from('analise_jobs')
     .select('id,nome,status,modo_solicitado,modo_efetivo,usar_groq,total_itens,itens_concluidos,itens_falhos,total_lotes,lotes_concluidos,lotes_falhos,provedores,batch_state,erro,created_at,updated_at,finished_at')
+    .in('status', STATUS_JOB_ATIVOS)
     .order('created_at', { ascending: false })
     .limit(limite);
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function listarHistoricoClassificacao(limite = 100) {
+  const quantidade = Math.max(1, Math.min(Number(limite) || 100, 200));
+  const { data, error } = await supabase
+    .from('analise_jobs')
+    .select('id,nome,status,modo_solicitado,modo_efetivo,usar_groq,total_itens,itens_concluidos,itens_falhos,total_lotes,lotes_concluidos,lotes_falhos,provedores,batch_state,erro,created_at,updated_at,finished_at')
+    .in('status', STATUS_JOB_FINAIS)
+    .order('created_at', { ascending: false })
+    .limit(quantidade);
   if (error) throw new Error(error.message);
   return data || [];
 }

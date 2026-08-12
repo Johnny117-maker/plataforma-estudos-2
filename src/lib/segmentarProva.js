@@ -14,6 +14,7 @@
 
 const RE_SO_SIMBOLOS = /^[\s\-–—_.·•=]*$/;
 const RE_FIM_DOCUMENTO = /^\s*(?:gabarito\s+oficial|folha\s+de\s+respostas|rascunho(?:\s+da\s+reda[çc][ãa]o)?|proposta\s+de\s+reda[çc][ãa]o)\s*$/i;
+const RE_RODAPE_FATEC = /^\s*(?:\d{1,3}\s+VESTIBULAR\s*[∙·•.-]?\s*Fatec|VESTIBULAR\s*[∙·•.-]?\s*Fatec\s+\d{1,3})\s*$/i;
 
 // Marcadores que abrem a parte comentada de uma questão.
 const RE_COMENTARIO =
@@ -77,6 +78,10 @@ export function limparLinhas(linhas) {
   for (const l of linhas) {
     const texto = normalizar(l.texto);
     if (!texto || RE_SO_SIMBOLOS.test(texto)) continue;
+    if (RE_RODAPE_FATEC.test(texto)) {
+      descartadas.push({ ...l, texto });
+      continue;
+    }
     limpas.push({ texto, pagina: l.pagina });
   }
   const inicio = Math.floor(limpas.length * 0.6);
@@ -160,6 +165,11 @@ function extrairPartes(corpo, perfil) {
   const linhasAlternativas = iAlt !== null ? corpo.slice(iAlt, fimAlternativas) : [];
   const alternativas = [];
   for (const linha of linhasAlternativas) {
+    // Se um cabeçalho não entrou na sequência principal por causa da ordem de
+    // leitura do PDF, ele ainda deve encerrar a alternativa anterior. Perder
+    // uma questão e sinalizá-la para revisão é melhor do que misturar duas.
+    if (alternativas.length && perfil.abre.test(linha.texto)) break;
+    if (alternativas.length && RE_COMPARTILHADO.test(linha.texto)) break;
     const inicio = perfil.alternativa.exec(linha.texto);
     if (inicio) alternativas.push(linha.texto);
     else if (alternativas.length) alternativas[alternativas.length - 1] += `\n${linha.texto}`;
@@ -263,11 +273,21 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
       alvos,
       rotulo: l.texto,
       texto: linhas.slice(i, fim).map((x) => x.texto).join('\n'),
+      // Estes índices também funcionam como fronteira da questão anterior.
+      // Sem esse corte, tudo entre a alternativa E e o próximo cabeçalho era
+      // anexado à última alternativa, mesmo quando já era o texto de apoio das
+      // questões seguintes (caso real: Fatec 2026, questões 40 a 42).
+      indiceInicio: i,
+      indiceFim: fim,
     });
   });
 
   const questoes = aceitos.map((c, i) => {
-    const fim = i + 1 < aceitos.length ? aceitos[i + 1].indice : linhas.length;
+    const fimNatural = i + 1 < aceitos.length ? aceitos[i + 1].indice : linhas.length;
+    const proximoApoio = compartilhados
+      .filter((apoio) => apoio.indiceInicio > c.indice && apoio.indiceInicio < fimNatural)
+      .sort((a, b) => a.indiceInicio - b.indiceInicio)[0];
+    const fim = proximoApoio?.indiceInicio ?? fimNatural;
     const corpo = linhas.slice(c.indice + 1, fim);
     const partes = extrairPartes(corpo, perfil);
     const minerado = minerarComentario(partes.comentario, corpo);
@@ -328,10 +348,11 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
 
 /** Atalho para texto colado ou editado à mão. */
 export function segmentarTextoBruto(texto, perfilNome = 'auto') {
-  const linhas = texto
+  const brutas = texto
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((t) => ({ texto: normalizar(t), pagina: 1 }))
     .filter((l) => l.texto);
+  const { linhas } = limparLinhas(brutas);
   return segmentarQuestoes(linhas, perfilNome);
 }

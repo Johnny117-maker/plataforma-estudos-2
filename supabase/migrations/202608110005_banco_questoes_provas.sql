@@ -163,7 +163,7 @@ create index if not exists historico_user_teste_idx on public.historico_resposta
 create or replace function public.preencher_hash_pergunta_banco()
 returns trigger
 language plpgsql
-set search_path=public
+set search_path=public,extensions
 as $$
 declare v_texto text;
 begin
@@ -199,7 +199,7 @@ create or replace function public.publicar_banco_questoes(p_nome text,p_provas j
 returns jsonb
 language plpgsql
 security invoker
-set search_path=public
+set search_path=public,extensions
 as $$
 declare
   v_user uuid:=auth.uid();

@@ -133,8 +133,11 @@ export default function AnalisarProva() {
       try {
         const { job, lotes } = await obterJobClassificacao(jobAtivo);
         if (desmontado) return;
-        setJobs((atuais) => [job, ...atuais.filter((item) => item.id !== job.id)].slice(0, 6));
-        if (STATUS_JOB_FINAIS.includes(job.status) && resultadoCarregadoRef.current !== job.id) {
+        const finalizado = STATUS_JOB_FINAIS.includes(job.status);
+        setJobs((atuais) => (finalizado
+          ? atuais.filter((item) => item.id !== job.id)
+          : [job, ...atuais.filter((item) => item.id !== job.id)].slice(0, 6)));
+        if (finalizado && resultadoCarregadoRef.current !== job.id) {
           resultadoCarregadoRef.current = job.id;
           setDocumentos(aplicarResultadosAoSnapshot(job.documentos_snapshot, lotes));
           setNome(job.nome);
@@ -144,6 +147,7 @@ export default function AnalisarProva() {
             ? `${concluidos} conteúdos classificados e ${falhos} pendentes. O resultado disponível foi restaurado.`
             : `${concluidos} conteúdos classificados em segundo plano. Resultado restaurado.`);
         }
+        if (finalizado) setJobAtivo(null);
       } catch (pollError) {
         if (!desmontado) setErro(`Não foi possível atualizar o job: ${pollError.message}`);
       }

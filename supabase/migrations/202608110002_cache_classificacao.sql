@@ -19,7 +19,10 @@ alter table public.questoes_extraidas
 create or replace function public.preencher_hash_questao()
 returns trigger
 language plpgsql
-set search_path = public
+-- No Supabase, extensões como pgcrypto ficam normalmente no schema
+-- `extensions`. Mantemos `public` primeiro para as tabelas da aplicação e
+-- incluímos `extensions` para que digest() seja resolvida corretamente.
+set search_path = public, extensions
 as $$
 declare
   v_texto text;

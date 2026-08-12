@@ -6,6 +6,8 @@ vi.mock('../supabaseClient', () => ({
 import {
   aplicarResultadosAoSnapshot,
   criarSnapshotDocumentos,
+  filtrarJobsAtivos,
+  filtrarJobsFinalizados,
   montarLotesClassificacao,
   percentualJob,
   rotuloStatusJob,
@@ -58,5 +60,19 @@ describe('jobs assíncronos de análise', () => {
   it('calcula progresso e traduz estados persistidos', () => {
     expect(percentualJob({ total_itens: 100, itens_concluidos: 38, itens_falhos: 2 })).toBe(40);
     expect(rotuloStatusJob('aguardando_batch')).toBe('Aguardando Gemini Batch');
+  });
+
+  it('mantém na tela somente processamentos ainda ativos', () => {
+    const jobs = [
+      { id: '1', status: 'pendente' },
+      { id: '2', status: 'processando' },
+      { id: '3', status: 'aguardando_batch' },
+      { id: '4', status: 'concluido' },
+      { id: '5', status: 'falhou' },
+      { id: '6', status: 'cancelado' },
+    ];
+
+    expect(filtrarJobsAtivos(jobs).map((job) => job.id)).toEqual(['1', '2', '3']);
+    expect(filtrarJobsFinalizados(jobs).map((job) => job.id)).toEqual(['4', '5', '6']);
   });
 });

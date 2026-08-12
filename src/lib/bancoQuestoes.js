@@ -1,5 +1,11 @@
 const LETRAS = 'ABCDE';
 
+// Uma alternativa não pode carregar o cabeçalho de outra questão nem uma
+// instrução que abre um bloco compartilhado. Isso é uma defesa adicional à
+// segmentação: se um PDF novo tiver diagramação inesperada, a questão fica em
+// revisão em vez de contaminar o banco e os simulados.
+const RE_TEXTO_DE_OUTRA_QUESTAO = /\bquest[ãa]o\s+\d{1,3}\b|\b(?:leia|texto|considere|observe|analise)\b.{0,160}\bquest[õo]es?\s+\d{1,3}\b/is;
+
 const MATERIAS_GABARITO = [
   ['História Brasileira', ['historia brasileira', 'historia do brasil']],
   ['História Geral', ['historia geral']],
@@ -236,13 +242,17 @@ function resolverSubgenero(classificacao, materia) {
 
 export function validarQuestaoParaBanco(questao, materias = []) {
   const pendencias = [];
-  const alternativas = (questao?.alternativas || []).map(limparAlternativa).filter(Boolean);
+  const alternativasOriginais = questao?.alternativas || [];
+  const alternativas = alternativasOriginais.map(limparAlternativa).filter(Boolean);
   const materia = resolverMateria(questao?.classificacao, materias);
   const letra = normalizarLetra(questao?.gabarito);
 
   if (!Number.isInteger(Number(questao?.numero)) || Number(questao.numero) < 1) pendencias.push('sem número');
   if (String(questao?.enunciado || '').trim().length < 40) pendencias.push('enunciado incompleto');
   if (alternativas.length !== 5) pendencias.push(`${alternativas.length}/5 alternativas`);
+  if (alternativasOriginais.some((alternativa) => RE_TEXTO_DE_OUTRA_QUESTAO.test(String(alternativa)))) {
+    pendencias.push('alternativa contém texto de outra questão');
+  }
   if (!letra) pendencias.push('sem resposta do gabarito');
   if (!materia) pendencias.push('matéria ainda não classificada');
   if (questao?.dependeDeVisual && !questao?.visualAnalisado && !questao?.descricaoVisual) {

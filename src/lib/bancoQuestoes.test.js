@@ -96,6 +96,23 @@ describe('publicação e testes', () => {
     });
   });
 
+  it('bloqueia alternativa contaminada por cabeçalho ou apoio de outra questão', () => {
+    const contaminada = {
+      ...questao,
+      alternativas: [
+        '(A) Um',
+        '(B) Dois',
+        '(C) Três',
+        '(D) Quatro',
+        '(E) Cinco\nLeia o texto para responder às questões 2 e 3.\nContexto seguinte.',
+      ],
+    };
+    const validacao = validarQuestaoParaBanco(contaminada, [materia]);
+
+    expect(validacao.pronta).toBe(false);
+    expect(validacao.pendencias).toContain('alternativa contém texto de outra questão');
+  });
+
   it('prioriza questões com maior taxa de erro', () => {
     const perguntas = [{ id: 'a' }, { id: 'b' }];
     const historico = [

@@ -21,6 +21,8 @@ supabase/migrations/202608110005_banco_questoes_provas.sql
 
 Ela cria as tabelas de provas, versões do gabarito e testes, acrescenta a origem nas perguntas e mantém os registros antigos.
 
+A migração `202608120001_corrige_search_path_pgcrypto.sql` corrige a resolução da função `digest()` em projetos Supabase que mantêm o `pgcrypto` no schema `extensions`.
+
 ## 2. Publicar o frontend
 
 ```powershell

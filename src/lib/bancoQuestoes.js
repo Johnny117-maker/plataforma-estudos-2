@@ -8,7 +8,11 @@ const RE_TEXTO_DE_OUTRA_QUESTAO = /\bquest[ãa]o\s+\d{1,3}\b|\b(?:leia|texto|con
 
 const MATERIAS_GABARITO = [
   ['História Brasileira', ['historia brasileira', 'historia do brasil']],
-  ['História Geral', ['historia geral']],
+  // Os gabaritos da Fatec usam apenas "História". A plataforma já separa
+  // História Geral e Brasileira; quando o caderno não faz essa distinção,
+  // usamos a matéria geral em vez de herdar silenciosamente a área anterior.
+  ['História Geral', ['historia geral', 'historia']],
+  ['Multidisciplinar', ['multidisciplinar', 'interdisciplinar']],
   ['Raciocínio Lógico', ['raciocinio logico', 'logica']],
   ['Português', ['lingua portuguesa', 'portugues']],
   ['Matemática', ['matematica']],

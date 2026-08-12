@@ -33,6 +33,19 @@ describe('extração de gabarito', () => {
     expect(resultado.itens[0]).toMatchObject({ numero: 44, resposta: 'E', retificada: true });
     expect(resultado.retificado).toBe(true);
   });
+
+  it('não herda a disciplina anterior em História e Multidisciplinar', () => {
+    const resultado = extrairItensGabarito([
+      { texto: 'História', pagina: 1 },
+      { texto: '01 A', pagina: 1 },
+      { texto: 'Multidisciplinar', pagina: 1 },
+      { texto: '02 B', pagina: 1 },
+    ]);
+    expect(resultado.itens).toEqual([
+      expect.objectContaining({ numero: 1, disciplina: 'História Geral' }),
+      expect.objectContaining({ numero: 2, disciplina: 'Multidisciplinar' }),
+    ]);
+  });
 });
 
 describe('identificação e vínculo', () => {

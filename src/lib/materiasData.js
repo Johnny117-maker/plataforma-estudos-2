@@ -16,6 +16,7 @@ export const DEFAULT_MATERIAS = [
   { nome: 'Raciocínio Lógico', cor: '#DB6D28', ordem: 11 },
   { nome: 'Sociologia', cor: '#BC8CFF', ordem: 12 },
   { nome: 'Filosofia', cor: '#7D8590', ordem: 13 },
+  { nome: 'Multidisciplinar', cor: '#6E7681', ordem: 14 },
 ];
 
 // Assuntos (subgêneros) de Matemática, organizados em 3 blocos temáticos

@@ -70,12 +70,36 @@ function escolherLacunaVisual(questao, pagina) {
     .sort((a, b) => b.area - a.area)[0] || null;
 }
 
+function unirPainelVisual(regioes, tipoCaptura = 'painel_visual_completo') {
+  const validas = (regioes || []).filter(Boolean);
+  if (!validas.length) return null;
+  const base = validas[0];
+  const x0 = Math.min(...validas.map((regiao) => regiao.x0));
+  const x1 = Math.max(...validas.map((regiao) => regiao.x1));
+  const y0 = Math.min(...validas.map((regiao) => regiao.y0));
+  const y1 = Math.max(...validas.map((regiao) => regiao.y1));
+  return {
+    ...base,
+    x0,
+    x1,
+    y0,
+    y1,
+    largura: x1 - x0,
+    altura: y1 - y0,
+    tipoCaptura,
+  };
+}
+
 /**
  * Extrai somente figuras, gráficos e diagramas associados à questão. Imagens
  * raster usam a posição exata do objeto no PDF; elementos vetoriais usam a
  * maior faixa gráfica existente entre os trechos de texto.
  */
-export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso) {
+export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso, opcoes = {}) {
+  const {
+    preferirPainelCompleto = false,
+    fallbackQuestaoCompleta = false,
+  } = opcoes;
   const alvos = (questoes || []).filter((questao) => (
     questao.id && questao.dependeDeVisual && questao.recortesOrigem?.length
   ));
@@ -116,11 +140,39 @@ export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso)
         const rasterDireto = regioesRaster
           .filter((regiao) => regiaoPertenceAQuestao(regiao, recortes));
         const rasterAssociado = incluirRegioesRelacionadas(rasterDireto, regioesRaster);
-        let regioes = criarRegioesCapturaRaster(rasterAssociado);
+        const regioesRasterCaptura = criarRegioesCapturaRaster(rasterAssociado);
+        const lacuna = questao.dependeDeVisual
+          ? escolherLacunaVisual(questao, numeroPagina)
+          : null;
+        let regioes = regioesRasterCaptura;
 
-        if (!regioes.length && questao.dependeDeVisual) {
-          const lacuna = escolherLacunaVisual(questao, numeroPagina);
-          if (lacuna) regioes = [{ ...lacuna, tipoCaptura: 'faixa_vetorial' }];
+        // No modo de importação manual, a faixa vetorial e todos os objetos
+        // raster associados formam um único painel. É isso que impede um
+        // ícone periférico (por exemplo, o jogador) de substituir o gráfico.
+        if (preferirPainelCompleto && questao.alternativasRepresentadasNaImagem && recortes.length) {
+          const painel = unirPainelVisual(recortes, 'questao_visual_completa');
+          regioes = painel ? [painel] : [];
+        } else if (preferirPainelCompleto && lacuna) {
+          // Sem raster, a união das faixas da questão é mais confiável do que
+          // uma única lacuna: painéis com cinco gráficos costumam ter rótulos
+          // de texto que dividem o desenho em várias lacunas menores.
+          const bases = regioesRasterCaptura.length
+            ? [...regioesRasterCaptura, lacuna]
+            : recortes;
+          const painel = unirPainelVisual(bases, 'painel_visual_completo');
+          regioes = painel ? [painel] : [];
+        } else if (!regioes.length && lacuna) {
+          regioes = [{ ...lacuna, tipoCaptura: 'faixa_vetorial' }];
+        }
+
+        // Último recurso seguro: captura a região completa já atribuída à
+        // questão. Assim uma tabela ou diagrama incomum nunca faz a questão
+        // desaparecer da importação por não ser um objeto raster isolável.
+        if (!regioes.length && fallbackQuestaoCompleta && questao.dependeDeVisual) {
+          regioes = recortes.map((recorte) => ({
+            ...recorte,
+            tipoCaptura: 'questao_visual_completa',
+          }));
         }
 
         regioes
@@ -173,14 +225,16 @@ export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso)
   }
 }
 
-export async function salvarCapturasQuestoes(hashDocumento, capturas) {
+export async function salvarCapturasQuestoes(hashDocumento, capturas, onProgresso) {
   if (!capturas?.length) return new Map();
   const { data: authData, error: authError } = await supabase.auth.getUser();
   if (authError || !authData?.user) throw new Error('Sessão inválida para salvar as imagens das questões.');
   const usuarioId = authData.user.id;
   const resultados = new Map();
 
-  for (const captura of capturas) {
+  for (let indice = 0; indice < capturas.length; indice += 1) {
+    const captura = capturas[indice];
+    onProgresso?.(indice + 1, capturas.length, captura);
     const caminho = await criarCaminhoImagemQuestao(usuarioId, hashDocumento, captura);
     const { error } = await supabase.storage
       .from(BUCKET_IMAGENS_QUESTOES)

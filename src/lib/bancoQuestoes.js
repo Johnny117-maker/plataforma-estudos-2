@@ -226,11 +226,28 @@ export function vincularGabaritosAutomaticamente(documentos) {
   });
 }
 
-function resolverMateria(classificacao, materias) {
-  const nome = classificacao?.materia_nome;
+function resolverMateria(classificacao, materias, materiaConhecida = null) {
+  const nome = classificacao?.materia_nome || materiaConhecida;
   if (!nome) return null;
   const alvo = semAcentos(nome);
   return (materias || []).find((materia) => semAcentos(materia.nome) === alvo) || null;
+}
+
+function ordemAlternativasReconhecivel(questao, quantidadeAlternativas) {
+  if (!Array.isArray(questao?.letras) || questao.letras.length === 0) return true;
+  const letras = questao.letras.map((letra) => String(letra).trim().toUpperCase());
+  // Com as cinco alternativas já segmentadas, marcadores ausentes na
+  // camada textual não alteram a ordem posicional preservada pelo extrator.
+  if (letras.length !== quantidadeAlternativas) return quantidadeAlternativas === 5;
+  return letras.join('') === LETRAS.slice(0, quantidadeAlternativas);
+}
+
+function textoEnunciadoBanco(questao) {
+  const apoio = (questao?.apoio || [])
+    .map((item) => String(item?.texto || item || '').trim())
+    .filter(Boolean)
+    .join('\n');
+  return [apoio, String(questao?.enunciado || '').trim()].filter(Boolean).join('\n\n').trim();
 }
 
 function resolverSubgenero(classificacao, materia) {
@@ -244,19 +261,23 @@ export function validarQuestaoParaBanco(questao, materias = []) {
   const pendencias = [];
   const alternativasOriginais = questao?.alternativas || [];
   const alternativas = alternativasOriginais.map(limparAlternativa).filter(Boolean);
-  const materia = resolverMateria(questao?.classificacao, materias);
+  const materiaConhecida = questao?.disciplinaGabarito || questao?.materiaConhecida || null;
+  const materia = resolverMateria(questao?.classificacao, materias, materiaConhecida);
   const letra = normalizarLetra(questao?.gabarito);
+  const indiceResposta = letraParaIndice(letra);
+  const enunciado = textoEnunciadoBanco(questao);
 
   if (!Number.isInteger(Number(questao?.numero)) || Number(questao.numero) < 1) pendencias.push('sem número');
-  if (String(questao?.enunciado || '').trim().length < 40) pendencias.push('enunciado incompleto');
+  if (enunciado.length < 40) pendencias.push('enunciado incompleto');
   if (alternativas.length !== 5) pendencias.push(`${alternativas.length}/5 alternativas`);
-  if (Array.isArray(questao?.letras) && questao.letras.join('').toUpperCase() !== 'ABCDE') {
+  if (!ordemAlternativasReconhecivel(questao, alternativas.length)) {
     pendencias.push('ordem das alternativas inválida');
   }
   if (alternativasOriginais.some((alternativa) => RE_TEXTO_DE_OUTRA_QUESTAO.test(String(alternativa)))) {
     pendencias.push('alternativa contém texto de outra questão');
   }
   if (!letra) pendencias.push('sem resposta do gabarito');
+  else if (indiceResposta >= alternativas.length) pendencias.push('resposta fora das alternativas disponíveis');
   if (!materia) pendencias.push('matéria ainda não classificada');
   if (questao?.dependeDeVisual && !questao?.visualAnalisado && !questao?.descricaoVisual) {
     pendencias.push('elemento visual não revisado');
@@ -265,7 +286,7 @@ export function validarQuestaoParaBanco(questao, materias = []) {
     pendencias.push('recurso visual ainda não extraído');
   }
 
-  return { pronta: pendencias.length === 0, pendencias, alternativas, letra, materia };
+  return { pronta: pendencias.length === 0, pendencias, alternativas, letra, materia, enunciado };
 }
 
 export function prepararProvasParaBanco(documentos, materias, nomeAnalise = 'Banco de questões', analiseId = null) {
@@ -293,7 +314,7 @@ export function prepararProvasParaBanco(documentos, materias, nomeAnalise = 'Ban
       questoes.push({
         numero: Number(questao.numero),
         pagina: questao.pagina || null,
-        enunciado: String(questao.enunciado || '').trim(),
+        enunciado: validacao.enunciado,
         alternativas: validacao.alternativas,
         resposta: validacao.letra,
         materia_id: validacao.materia.id,

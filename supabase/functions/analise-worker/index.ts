@@ -9,7 +9,11 @@ const FLASH_LITE_MODEL = Deno.env.get('GEMINI_FLASH_LITE_MODEL') || 'gemini-3.5-
 const MAX_MENSAGENS_EXECUCAO = 6;
 const TEMPO_MAXIMO_EXECUCAO_MS = 105_000;
 const TEMPO_MAXIMO_REQUISICAO_IA_MS = 70_000;
+const TEMPO_MINIMO_PARA_NOVA_MENSAGEM_MS = TEMPO_MAXIMO_REQUISICAO_IA_MS + 5_000;
 const TEMPO_LOTE_ABANDONADO_MS = 3 * 60_000;
+const TEMPO_LOTE_PENDENTE_SEM_MENSAGEM_MS = 90_000;
+const TENTATIVAS_FLASH_ANTES_FALLBACK = 2;
+const CONFIANCA_MAXIMA_FALLBACK_VISUAL = 0.59;
 const CONFIANCA_REFINO = 0.62;
 
 const corsHeaders = {
@@ -39,6 +43,12 @@ type QuestaoEntrada = {
   topico?: string | null;
   materiaConhecida?: string | null;
   dependeDeVisual?: boolean;
+};
+
+type PayloadLote = {
+  requerFlash?: boolean;
+  questoes?: QuestaoEntrada[];
+  [key: string]: unknown;
 };
 
 type Classificacao = {
@@ -173,6 +183,23 @@ async function atualizarJob(jobId: string, valores: Record<string, unknown>) {
   if (error) throw new Error(`Falha ao atualizar job: ${error.message}`);
 }
 
+async function reivindicarLote(lote: Record<string, unknown>, tentativa: number) {
+  const { data, error } = await admin.from('analise_lotes')
+    .update({
+      status: 'processando',
+      tentativas: tentativa,
+      started_at: lote.started_at || agoraIso(),
+      proxima_tentativa: null,
+      erro: null,
+    })
+    .eq('id', lote.id)
+    .in('status', ['pendente', 'aguardando_limite', 'aguardando_refino'])
+    .select('id')
+    .maybeSingle();
+  if (error) throw new Error(`Falha ao reivindicar lote: ${error.message}`);
+  return Boolean(data);
+}
+
 async function publicarMensagem(message: QueueMessage['message'], atraso = 0) {
   return rpc<number>('worker_publicar_mensagem', {
     p_mensagem: message,
@@ -250,6 +277,15 @@ function substituirClassificacoes(base: Classificacao[], novas: Classificacao[])
   return [...porId.values()];
 }
 
+function marcarFallbackVisual(classificacoes: Classificacao[]) {
+  return classificacoes.map((item) => ({
+    ...item,
+    confianca: Math.min(Number(item.confianca) || 0, CONFIANCA_MAXIMA_FALLBACK_VISUAL),
+    origem: 'fallback_flash_lite_visual',
+    requer_revisao_visual: true,
+  }));
+}
+
 async function carregarLoteEJob(loteId: string, jobId: string) {
   const [loteResposta, jobResposta] = await Promise.all([
     admin.from('analise_lotes').select('*').eq('id', loteId).eq('job_id', jobId).maybeSingle(),
@@ -269,17 +305,14 @@ async function processarClassificacao(message: QueueMessage['message']): Promise
   if (!message.lote_id) return { tipo: 'descartar' };
   const { lote, job } = await carregarLoteEJob(message.lote_id, message.job_id);
   if (!lote || !job) return { tipo: 'descartar' };
-  if (job.status === 'cancelado' || ['concluido', 'falhou', 'cancelado'].includes(lote.status)) {
+  if (job.status === 'cancelado' || ['processando', 'concluido', 'falhou', 'cancelado'].includes(lote.status)) {
     return { tipo: 'concluir' };
   }
 
   const tentativa = Number(lote.tentativas || 0) + 1;
-  await atualizarLote(lote.id, {
-    status: 'processando', tentativas: tentativa, started_at: lote.started_at || agoraIso(),
-    proxima_tentativa: null, erro: null,
-  });
+  if (!(await reivindicarLote(lote, tentativa))) return { tipo: 'concluir' };
 
-  const payload = lote.payload as { requerFlash?: boolean; questoes?: QuestaoEntrada[] };
+  const payload = lote.payload as PayloadLote;
   const todas = Array.isArray(payload.questoes) ? payload.questoes : [];
   const refinarIds = new Set((message.refinar_ids || []).map(String));
   const somenteRefino = refinarIds.size > 0;
@@ -291,6 +324,7 @@ async function processarClassificacao(message: QueueMessage['message']): Promise
     let uso = { gemini_flash_lite: 0, gemini_flash: 0, groq: 0 };
     let modeloFinal = '';
     let provedorFinal = '';
+    let fallbackVisualUsado = false;
 
     if (somenteRefino) {
       const refinado = await classificarComModelo(job, lote, alvo, 'flash');
@@ -305,10 +339,28 @@ async function processarClassificacao(message: QueueMessage['message']): Promise
       const usarGroq = Boolean(job.usar_groq) && !usarFlash && Number(lote.ordem) % 4 === 0 && tentativa === 1;
       let inicial;
       if (usarFlash) {
-        inicial = await classificarComModelo(job, lote, alvo, 'flash');
-        uso.gemini_flash = alvo.length;
-        modeloFinal = String(inicial.ia?.modelo || 'gemini-flash');
-        provedorFinal = 'gemini';
+        try {
+          inicial = await classificarComModelo(job, lote, alvo, 'flash');
+          uso.gemini_flash = alvo.length;
+          modeloFinal = String(inicial.ia?.modelo || 'gemini-flash');
+          provedorFinal = 'gemini';
+        } catch (error) {
+          const falha = error instanceof FalhaHttp ? error : new FalhaHttp(
+            error instanceof Error ? error.message : 'Falha inesperada no Gemini Flash.', 500, 30,
+          );
+          const recuperavel = [429, 500, 502, 503, 504].includes(falha.status);
+          if (!recuperavel || tentativa < TENTATIVAS_FLASH_ANTES_FALLBACK) throw error;
+
+          // A descrição visual já está presente em `texto`. Depois de duas
+          // falhas do Flash, o Lite conclui o lote e reduz a confiança para
+          // que a interface mantenha essas questões em revisão visual.
+          inicial = await classificarComModelo(job, lote, alvo, 'lite');
+          inicial.classificacoes = marcarFallbackVisual(inicial.classificacoes);
+          uso.gemini_flash_lite = alvo.length;
+          modeloFinal = `${String(inicial.ia?.modelo || 'gemini-flash-lite')} (fallback visual)`;
+          provedorFinal = 'gemini';
+          fallbackVisualUsado = true;
+        }
       } else if (usarGroq) {
         try {
           inicial = await classificarComModelo(job, lote, alvo, 'groq');
@@ -329,7 +381,7 @@ async function processarClassificacao(message: QueueMessage['message']): Promise
       }
       classificacoes = inicial.classificacoes;
 
-      const ambiguas = (uso.gemini_flash_lite || uso.groq)
+      const ambiguas = !fallbackVisualUsado && (uso.gemini_flash_lite || uso.groq)
         ? classificacoes.filter((item) => Number(item.confianca) < CONFIANCA_REFINO)
         : [];
       if (ambiguas.length) {
@@ -581,11 +633,14 @@ async function executarAcaoMensagem(fila: QueueMessage, acao: AcaoMensagem) {
   } else if (acao.tipo === 'descartar') {
     await rpc('worker_descartar_mensagem', { p_msg_id: fila.msg_id });
   } else {
-    await rpc('worker_reagendar_mensagem', {
+    const msgId = await rpc<number>('worker_reagendar_mensagem', {
       p_msg_id: fila.msg_id,
       p_mensagem: acao.message,
       p_atraso_segundos: acao.atraso,
     });
+    if (acao.message.lote_id) {
+      await atualizarLote(acao.message.lote_id, { queue_msg_id: msgId });
+    }
   }
 }
 
@@ -644,6 +699,55 @@ async function recuperarLotesAbandonados() {
   return lotes?.length || 0;
 }
 
+async function idsPendentesDeRefino(loteId: string) {
+  const { data: lote, error } = await admin.from('analise_lotes')
+    .select('resultado').eq('id', loteId).maybeSingle();
+  if (error) throw new Error(error.message);
+  const classificacoes = Array.isArray(lote?.resultado?.classificacoes)
+    ? lote.resultado.classificacoes as Classificacao[]
+    : [];
+  return classificacoes
+    .filter((item) => Number(item.confianca) < CONFIANCA_REFINO)
+    .map((item) => String(item.id));
+}
+
+/**
+ * Recria mensagens perdidas ou cujo prazo de retry já venceu. Duplicatas são
+ * seguras: a primeira conclui o lote e as demais encontram o status final.
+ */
+async function recuperarLotesPendentesSemMensagem() {
+  const limitePendente = new Date(Date.now() - TEMPO_LOTE_PENDENTE_SEM_MENSAGEM_MS).toISOString();
+  const agora = agoraIso();
+  const { data: lotes, error } = await admin.from('analise_lotes')
+    .select('id,job_id,status,updated_at,proxima_tentativa')
+    .in('status', ['pendente', 'aguardando_limite', 'aguardando_refino'])
+    .or(`proxima_tentativa.lte.${agora},and(proxima_tentativa.is.null,updated_at.lt.${limitePendente})`)
+    .order('updated_at', { ascending: true })
+    .limit(20);
+  if (error) throw new Error(`Falha ao recuperar lotes pendentes: ${error.message}`);
+
+  for (const lote of lotes || []) {
+    const refinarIds = lote.status === 'aguardando_refino'
+      ? await idsPendentesDeRefino(String(lote.id))
+      : [];
+    const msgId = await publicarMensagem({
+      tipo: 'classificar_lote',
+      job_id: String(lote.job_id),
+      lote_id: String(lote.id),
+      ...(refinarIds.length ? { refinar_ids: refinarIds } : {}),
+    });
+    await atualizarLote(String(lote.id), {
+      status: lote.status === 'aguardando_refino' ? 'aguardando_refino' : 'pendente',
+      queue_msg_id: msgId,
+      proxima_tentativa: null,
+      erro: lote.status === 'aguardando_limite'
+        ? 'Limite encerrado; lote recolocado automaticamente na fila.'
+        : null,
+    });
+  }
+  return lotes?.length || 0;
+}
+
 async function registrarFalhaDefinitiva(fila: QueueMessage, error: unknown) {
   const detalhe = error instanceof Error ? error.message : String(error);
   if (fila.message.tipo === 'classificar_lote' && fila.message.lote_id) {
@@ -674,9 +778,15 @@ async function processarFila() {
   } catch (error) {
     console.error('Não foi possível verificar lotes interrompidos:', error);
   }
+  try {
+    await recuperarLotesPendentesSemMensagem();
+  } catch (error) {
+    console.error('Não foi possível verificar lotes pendentes:', error);
+  }
 
   while (processadas < MAX_MENSAGENS_EXECUCAO) {
-    if (Date.now() - inicio > TEMPO_MAXIMO_EXECUCAO_MS) {
+    const tempoRestante = TEMPO_MAXIMO_EXECUCAO_MS - (Date.now() - inicio);
+    if (processadas > 0 && tempoRestante < TEMPO_MINIMO_PARA_NOVA_MENSAGEM_MS) {
       interrompidaPorTempo = true;
       break;
     }

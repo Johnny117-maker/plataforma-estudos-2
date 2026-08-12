@@ -12,9 +12,14 @@
 // enunciado e as alternativas. E o comentário não é jogado fora: dele saem de
 // graça o gabarito, o tópico do programa e o índice de facilidade.
 
+import { criarLacunasVisuaisOrigem, criarRecortesOrigem } from './recortesQuestao.js';
+
 const RE_SO_SIMBOLOS = /^[\s\-–—_.·•=]*$/;
 const RE_FIM_DOCUMENTO = /^\s*(?:gabarito\s+oficial|folha\s+de\s+respostas|rascunho(?:\s+da\s+reda[çc][ãa]o)?|proposta\s+de\s+reda[çc][ãa]o)\s*$/i;
-const RE_RODAPE_FATEC = /^\s*(?:\d{1,3}\s+VESTIBULAR\s*[∙·•.-]?\s*Fatec|VESTIBULAR\s*[∙·•.-]?\s*Fatec\s+\d{1,3})\s*$/i;
+// Os cadernos recentes usam rodapés como "VESTIBULAR 2o SEM | 2026 • 5";
+// os antigos usam "14 VESTIBULAR · Fatec". Todos devem desaparecer antes
+// da divisão das alternativas.
+const RE_RODAPE_FATEC = /^\s*(?:\d{1,3}\s+)?VESTIBULAR\b.{0,60}?(?:\d{1,3}\s*)?[∙·•]?\s*$/i;
 
 // Marcadores que abrem a parte comentada de uma questão.
 const RE_COMENTARIO =
@@ -28,13 +33,13 @@ const RE_ACERTOS = /(\d{1,2}(?:[,.]\d+)?)\s*%\s*de\s+acertos/i;
 // Só conta como texto compartilhado a linha que ABRE um bloco de apoio. Sem a
 // âncora no início, a mesma expressão casaria dentro do comentário, que repete
 // coisas como "(texto comum para as questões 13 e 14)".
-const RE_COMPARTILHADO = /^\s*(?:Texto|Leia|Considere|Observe|Analise)\b.{0,70}?quest[õo]es\s+((?:de\s+)?\d[\d\s,ae]*)\s*[.:]?\s*$/i;
+const RE_COMPARTILHADO = /^\s*(?:Texto|Leia|Considere|Observe|Analise)\b.{0,220}?quest[õo]es?\s+((?:de\s+)?\d{1,3}(?:\s*(?:,|e|a)\s*\d{1,3})*)/i;
 
 // Palavras que indicam que a questão depende de algo que não é texto. Não é
 // motivo para descartar nada — é para marcar as questões que precisam do olho
 // humano antes de irem para a classificação.
 const RE_VISUAL =
-  /\b(figura|gr[áa]fico|imagem|tabela|mapa|tirinha|quadrinho|infogr[áa]fico|esquema|charge|heredograma|fluxograma|placa|desenho|fotografia|ilustra[çc][ãa]o)\b/i;
+  /\b(figura|gr[áa]fico|imagem|tabela|mapa|tirinha|quadrinho|infogr[áa]fico|esquema|diagrama|charge|heredograma|fluxograma|placa|desenho|fotografia|ilustra[çc][ãa]o|f[óo]rmulas? estruturais?|equa[çc][ãa]o representada)\b/i;
 
 export const PERFIS = {
   auto: { rotulo: 'Detectar automaticamente' },
@@ -48,7 +53,7 @@ export const PERFIS = {
   fatec: {
     rotulo: 'Fatec / Enem (Questão N, alternativas A–E)',
     abre: /^\s*Quest[ãa]o\s+(\d{1,3})\s*$/i,
-    alternativa: /^\s*\(([A-E])\)\s*\S/,
+    alternativa: /^\s*\(([A-E])\)(?:\s*\S.*)?$/,
     letras: 'ABCDE',
     comentada: false,
   },
@@ -61,14 +66,62 @@ export const PERFIS = {
   },
 };
 
+const RE_MARCADOR_ALTERNATIVA_SOZINHO = /^\s*\(([A-E])\)\s*$/;
+const RE_TERMO_FRACAO = /^\s*[−–—-]?\d+(?:[,.]\d+)?\s*$/;
+
+// Em algumas provas da Fatec, a camada textual entrega uma fração vertical na
+// ordem "numerador, (A), denominador". Reorganizar esse trio antes de procurar
+// as alternativas evita que todo o bloco seja incorporado ao enunciado.
+function normalizarAlternativasDiagramadas(corpo) {
+  const anotadas = (corpo || []).map((linha, indice) => ({
+    ...linha,
+    indiceOriginalInicio: indice,
+    indiceOriginalFim: indice,
+  }));
+  const saida = [];
+  for (let indice = 0; indice < anotadas.length; indice += 1) {
+    const linha = anotadas[indice];
+    const marcador = RE_MARCADOR_ALTERNATIVA_SOZINHO.exec(linha.texto);
+    const numerador = saida[saida.length - 1];
+    const denominador = anotadas[indice + 1];
+    if (
+      marcador
+      && numerador
+      && denominador
+      && RE_TERMO_FRACAO.test(numerador.texto)
+      && RE_TERMO_FRACAO.test(denominador.texto)
+    ) {
+      saida.pop();
+      saida.push({
+        ...linha,
+        texto: `(${marcador[1]}) ${numerador.texto.trim()}/${denominador.texto.trim()}`,
+        indiceOriginalInicio: numerador.indiceOriginalInicio,
+        indiceOriginalFim: denominador.indiceOriginalFim,
+      });
+      indice += 1;
+      continue;
+    }
+    saida.push(linha);
+  }
+  return saida;
+}
+
 function normalizar(texto) {
-  return texto
+  const limpo = texto
     .replace(/\u00A0/g, ' ')
     .replace(/\u00AD/g, '')
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/\s+/g, ' ')
     .trim();
+  // Alguns PDFs possuem a mesma camada textual duas vezes exatamente sobre a
+  // mesma posição. O pdf.js então devolve "Leia...07.Leia...07." em uma única
+  // linha. Remover a metade repetida restaura a instrução original.
+  if (limpo.length >= 24 && limpo.length % 2 === 0) {
+    const metade = limpo.length / 2;
+    if (limpo.slice(0, metade) === limpo.slice(metade)) return limpo.slice(0, metade);
+  }
+  return limpo;
 }
 
 /** Descarta linhas vazias e corta o rabo do documento (gabarito, redação). */
@@ -82,7 +135,9 @@ export function limparLinhas(linhas) {
       descartadas.push({ ...l, texto });
       continue;
     }
-    limpas.push({ texto, pagina: l.pagina });
+    // Mantém as coordenadas da linha: elas serão usadas depois para associar
+    // objetos gráficos e faixas vetoriais à questão correta.
+    limpas.push({ ...l, texto, pagina: l.pagina });
   }
   const inicio = Math.floor(limpas.length * 0.6);
   for (let i = inicio; i < limpas.length; i++) {
@@ -148,21 +203,31 @@ function numerosDoTrecho(trecho) {
   return [...new Set(nums)].sort((a, b) => a - b);
 }
 
+function detectarCompartilhado(linhas, indice) {
+  for (let quantidade = 1; quantidade <= 3 && indice + quantidade <= linhas.length; quantidade += 1) {
+    const texto = linhas.slice(indice, indice + quantidade).map((linha) => linha.texto).join(' ');
+    const match = RE_COMPARTILHADO.exec(texto);
+    if (match) return { match, texto, quantidade };
+  }
+  return null;
+}
+
 function extrairPartes(corpo, perfil) {
+  const linhasCorpo = normalizarAlternativasDiagramadas(corpo);
   let iAlt = null;
   let iCom = null;
-  for (let k = 0; k < corpo.length; k++) {
-    if (iAlt === null && perfil.alternativa.test(corpo[k].texto)) iAlt = k;
-    if (iCom === null && RE_COMENTARIO.test(corpo[k].texto)) iCom = k;
+  for (let k = 0; k < linhasCorpo.length; k++) {
+    if (iAlt === null && perfil.alternativa.test(linhasCorpo[k].texto)) iAlt = k;
+    if (iCom === null && RE_COMENTARIO.test(linhasCorpo[k].texto)) iCom = k;
   }
   // Alternativa que aparece depois do comentário é citação, não alternativa.
   if (iCom !== null && iAlt !== null && iAlt > iCom) iAlt = null;
 
-  const fimEnunciado = iAlt !== null ? iAlt : iCom !== null ? iCom : corpo.length;
-  const fimAlternativas = iCom !== null ? iCom : corpo.length;
+  const fimEnunciado = iAlt !== null ? iAlt : iCom !== null ? iCom : linhasCorpo.length;
+  const fimAlternativas = iCom !== null ? iCom : linhasCorpo.length;
 
-  const enunciado = corpo.slice(0, fimEnunciado).map((l) => l.texto).join('\n');
-  const linhasAlternativas = iAlt !== null ? corpo.slice(iAlt, fimAlternativas) : [];
+  const enunciado = linhasCorpo.slice(0, fimEnunciado).map((l) => l.texto).join('\n');
+  const linhasAlternativas = iAlt !== null ? linhasCorpo.slice(iAlt, fimAlternativas) : [];
   const alternativas = [];
   for (const linha of linhasAlternativas) {
     // Se um cabeçalho não entrou na sequência principal por causa da ordem de
@@ -174,7 +239,7 @@ function extrairPartes(corpo, perfil) {
     if (inicio) alternativas.push(linha.texto);
     else if (alternativas.length) alternativas[alternativas.length - 1] += `\n${linha.texto}`;
   }
-  const comentario = iCom !== null ? corpo.slice(iCom).map((l) => l.texto).join('\n') : '';
+  const comentario = iCom !== null ? linhasCorpo.slice(iCom).map((l) => l.texto).join('\n') : '';
 
   const letras = [];
   for (const alternativa of alternativas) {
@@ -182,7 +247,13 @@ function extrairPartes(corpo, perfil) {
     if (m) letras.push(m[1]);
   }
 
-  return { enunciado, alternativas, comentario, letras };
+  return {
+    enunciado,
+    alternativas,
+    comentario,
+    letras,
+    indiceComentario: iCom !== null ? linhasCorpo[iCom].indiceOriginalInicio : null,
+  };
 }
 
 function minerarComentario(comentario, corpo) {
@@ -262,16 +333,16 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
   // aparecem antes do bloco da primeira questão que citam.
   const compartilhados = [];
   linhas.forEach((l, i) => {
-    const m = RE_COMPARTILHADO.exec(l.texto);
-    if (!m) return;
-    const alvos = numerosDoTrecho(m[1]);
+    const detectado = detectarCompartilhado(linhas, i);
+    if (!detectado) return;
+    const alvos = numerosDoTrecho(detectado.match[1]);
     if (alvos.length < 2) return;
     const primeiro = aceitos.find((a) => a.numero === alvos[0]);
     if (!primeiro || i > primeiro.indice) return;
     const fim = primeiro.indice;
     compartilhados.push({
       alvos,
-      rotulo: l.texto,
+      rotulo: detectado.texto,
       texto: linhas.slice(i, fim).map((x) => x.texto).join('\n'),
       // Estes índices também funcionam como fronteira da questão anterior.
       // Sem esse corte, tudo entre a alternativa E e o próximo cabeçalho era
@@ -289,9 +360,15 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
       .sort((a, b) => a.indiceInicio - b.indiceInicio)[0];
     const fim = proximoApoio?.indiceInicio ?? fimNatural;
     const corpo = linhas.slice(c.indice + 1, fim);
-    const partes = extrairPartes(corpo, perfil);
+    const partesExtraidas = extrairPartes(corpo, perfil);
+    const { indiceComentario, ...partes } = partesExtraidas;
     const minerado = minerarComentario(partes.comentario, corpo);
     const apoio = compartilhados.filter((s) => s.alvos.includes(c.numero));
+    const fimConteudoQuestao = c.indice + 1 + (indiceComentario ?? corpo.length);
+    const intervalosImagem = [
+      ...apoio.map((item) => ({ inicio: item.indiceInicio, fim: item.indiceFim })),
+      { inicio: c.indice, fim: fimConteudoQuestao },
+    ];
 
     return {
       numero: c.numero,
@@ -301,7 +378,12 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
       ...minerado,
       apoio,
       caracteres: partes.enunciado.length,
-      dependeDeVisual: RE_VISUAL.test(partes.enunciado),
+      dependeDeVisual: RE_VISUAL.test([
+        apoio.map((item) => item.texto).join('\n'),
+        partes.enunciado,
+      ].filter(Boolean).join('\n')),
+      recortesOrigem: criarRecortesOrigem(linhas, intervalosImagem),
+      lacunasVisuaisOrigem: criarLacunasVisuaisOrigem(linhas, intervalosImagem),
       
       paraClassificar: [apoio.map((s) => s.texto).join('\n'), partes.enunciado]
         .filter(Boolean)

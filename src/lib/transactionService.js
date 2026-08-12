@@ -23,7 +23,23 @@ export function salvarAnaliseProvas(nome, documentos) {
 }
 
 export function publicarBancoQuestoes(nome, provas) {
-  return rpc('publicar_banco_questoes', { p_nome: nome, p_provas: provas });
+  return rpc('publicar_banco_questoes_v2', { p_nome: nome, p_provas: provas });
+}
+
+export function limparBancoQuestoes() {
+  return rpc('limpar_banco_questoes', {});
+}
+
+export function vincularImagensPerguntas(provas) {
+  const imagens = (provas || []).flatMap((prova) => (prova.questoes || [])
+    .filter((questao) => questao.imagem_url)
+    .map((questao) => ({
+      hash_sha256: prova.hash_sha256,
+      numero: questao.numero,
+      imagem_url: questao.imagem_url,
+    })));
+  if (!imagens.length) return Promise.resolve(0);
+  return rpc('vincular_imagens_perguntas', { p_imagens: imagens }).then((total) => Number(total) || 0);
 }
 
 export function criarTesteBanco(titulo, perguntas, criterios = {}) {

@@ -156,7 +156,13 @@ function linhasDoBloco(itens) {
       texto += p.t;
       fimAnterior = p.x1;
     }
-    return texto.replace(/\s+$/, '');
+    return {
+      texto: texto.replace(/\s+$/, ''),
+      x0: Math.min(...g.itens.map((item) => item.x0)),
+      x1: Math.max(...g.itens.map((item) => item.x1)),
+      y0: Math.min(...g.itens.map((item) => item.y0)),
+      y1: Math.max(...g.itens.map((item) => item.y1)),
+    };
   });
 }
 
@@ -220,11 +226,16 @@ function juntarHifenizadas(linhas) {
     let atual = linhas[i];
     while (i + 1 < linhas.length) {
       const proxima = linhas[i + 1];
+      if (proxima.pagina !== atual.pagina) break;
       const macio = /\u00AD\s*$/.test(atual.texto);
       const duro = /[a-zà-ú]-\s*$/.test(atual.texto) && /^[a-zà-ú]/.test(proxima.texto);
       if (!macio && !duro) break;
       if (atual === linhas[i]) atual = { ...atual };
       atual.texto = atual.texto.replace(/[\u00AD-]\s*$/, '') + proxima.texto.replace(/^\s+/, '');
+      atual.x0 = Math.min(atual.x0, proxima.x0);
+      atual.x1 = Math.max(atual.x1, proxima.x1);
+      atual.y0 = Math.min(atual.y0, proxima.y0);
+      atual.y1 = Math.max(atual.y1, proxima.y1);
       i++;
     }
     out.push(atual);
@@ -308,8 +319,13 @@ export function montarLinhas(paginas) {
     if (corteVertical(corpo, largura) !== null) paginasComColuna++;
 
     for (const bloco of corteXY(corpo, largura)) {
-      for (const texto of linhasDoBloco(bloco)) {
-        if (texto.trim()) linhas.push({ texto, pagina: pagina.numero });
+      for (const linha of linhasDoBloco(bloco)) {
+        if (linha.texto.trim()) linhas.push({
+          ...linha,
+          pagina: pagina.numero,
+          larguraPagina: pagina.largura,
+          alturaPagina: pagina.altura,
+        });
       }
     }
   }

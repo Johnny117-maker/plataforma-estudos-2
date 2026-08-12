@@ -286,6 +286,9 @@ input:focus, select:focus, textarea:focus {
 .answer-key-grid small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .question-bank-controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-top: 9px; }
 .question-bank-controls .toggle-inline { min-height: 34px; }
+.question-capture-preview { margin: 10px 0 0; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.question-capture-preview img { display: block; width: 100%; max-height: 480px; object-fit: contain; }
+.question-capture-preview figcaption { margin-top: 7px; color: #57606a; font-size: 10.5px; text-align: center; }
 .bank-summary { border-left: 3px solid var(--success); }
 .selection-help { margin: -4px 0 14px; }
 .toggle-inline { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
@@ -315,7 +318,9 @@ input:focus, select:focus, textarea:focus {
 .quiz-meta { font-size: 11.5px; color: var(--muted); margin-bottom: 10px; }
 .quiz-source { display: inline-flex; margin-bottom: 9px; padding: 4px 8px; border-radius: 999px; background: var(--surface3); color: var(--gold); font-size: 10.5px; }
 .quiz-question { font-size: 14.5px; line-height: 1.6; margin-bottom: 16px; white-space: pre-wrap; }
-.quiz-image { display: block; max-width: 100%; max-height: 520px; object-fit: contain; margin: 0 auto 16px; border-radius: 8px; }
+.quiz-original-figure { margin: 0 0 16px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
+.quiz-original-figure figcaption { margin-top: 7px; color: #57606a; font-size: 10.5px; text-align: center; }
+.quiz-image { display: block; max-width: 100%; max-height: 620px; object-fit: contain; margin: 0 auto; border-radius: 5px; }
 .quiz-options, .quiz-dissertativa { display: flex; flex-direction: column; gap: 8px; }
 .quiz-option { text-align: left; padding: 11px 12px; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); cursor: pointer; }
 .quiz-option.correct { background: #123821; border-color: var(--success); }

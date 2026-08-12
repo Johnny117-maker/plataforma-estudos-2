@@ -33,7 +33,14 @@ export function religarCabecalhos(linhas) {
     const atual = linhas[i];
     const proxima = linhas[i + 1];
     if (proxima && RE_SO_ROTULO.test(atual.texto) && RE_SO_NUMERO.test(proxima.texto)) {
-      saida.push({ texto: `Questão ${proxima.texto.trim()}`, pagina: atual.pagina });
+      saida.push({
+        ...atual,
+        texto: `Questão ${proxima.texto.trim()}`,
+        x0: Math.min(atual.x0 ?? Infinity, proxima.x0 ?? Infinity),
+        x1: Math.max(atual.x1 ?? -Infinity, proxima.x1 ?? -Infinity),
+        y0: Math.min(atual.y0 ?? Infinity, proxima.y0 ?? Infinity),
+        y1: Math.max(atual.y1 ?? -Infinity, proxima.y1 ?? -Infinity),
+      });
       religadas += 1;
       i += 1;
       continue;

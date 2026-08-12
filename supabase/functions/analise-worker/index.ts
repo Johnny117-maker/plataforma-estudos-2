@@ -8,6 +8,8 @@ const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') || '';
 const FLASH_LITE_MODEL = Deno.env.get('GEMINI_FLASH_LITE_MODEL') || 'gemini-3.5-flash-lite';
 const MAX_MENSAGENS_EXECUCAO = 6;
 const TEMPO_MAXIMO_EXECUCAO_MS = 105_000;
+const TEMPO_MAXIMO_REQUISICAO_IA_MS = 70_000;
+const TEMPO_LOTE_ABANDONADO_MS = 3 * 60_000;
 const CONFIANCA_REFINO = 0.62;
 
 const corsHeaders = {
@@ -190,22 +192,34 @@ async function registrarUso(jobId: string, uso: Record<string, number>) {
 }
 
 async function chamarIA(body: Record<string, unknown>) {
-  const response = await fetch(`${SUPABASE_URL}/functions/v1/ia`, {
-    method: 'POST',
-    headers: {
-      apikey: SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.erro) {
-    const header = Number(response.headers.get('retry-after'));
-    const retryAfter = Number.isFinite(header) && header > 0 ? header : Number(payload?.retryAfter) || 30;
-    throw new FalhaHttp(payload?.erro || 'O serviço de IA não respondeu.', response.status, retryAfter);
+  const controlador = new AbortController();
+  const temporizador = setTimeout(() => controlador.abort(), TEMPO_MAXIMO_REQUISICAO_IA_MS);
+  try {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/ia`, {
+      method: 'POST',
+      headers: {
+        apikey: SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controlador.signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.erro) {
+      const header = Number(response.headers.get('retry-after'));
+      const retryAfter = Number.isFinite(header) && header > 0 ? header : Number(payload?.retryAfter) || 30;
+      throw new FalhaHttp(payload?.erro || 'O serviço de IA não respondeu.', response.status, retryAfter);
+    }
+    return payload as { resultado: { classificacoes: Classificacao[] }; ia?: Record<string, unknown> };
+  } catch (error) {
+    if (controlador.signal.aborted) {
+      throw new FalhaHttp('A chamada de IA excedeu 70 segundos e será repetida.', 504, 20);
+    }
+    throw error;
+  } finally {
+    clearTimeout(temporizador);
   }
-  return payload as { resultado: { classificacoes: Classificacao[] }; ia?: Record<string, unknown> };
 }
 
 async function classificarComModelo(
@@ -600,10 +614,66 @@ async function autoInvocar() {
   }
 }
 
+/**
+ * Se a Edge Function for encerrada durante uma chamada externa, a mensagem
+ * volta para a fila depois do tempo de visibilidade, mas o lote permanece com
+ * status `processando`. Esta varredura torna a retomada imediata e idempotente:
+ * uma eventual mensagem antiga será apenas descartada ao encontrar o lote já
+ * concluído.
+ */
+async function recuperarLotesAbandonados() {
+  const limite = new Date(Date.now() - TEMPO_LOTE_ABANDONADO_MS).toISOString();
+  const { data: lotes, error } = await admin.from('analise_lotes')
+    .update({
+      status: 'pendente',
+      proxima_tentativa: null,
+      erro: 'Processamento interrompido; lote recolocado automaticamente na fila.',
+    })
+    .eq('status', 'processando')
+    .lt('updated_at', limite)
+    .select('id,job_id')
+    .limit(20);
+  if (error) throw new Error(`Falha ao recuperar lotes interrompidos: ${error.message}`);
+
+  for (const lote of lotes || []) {
+    const msgId = await publicarMensagem({
+      tipo: 'classificar_lote', job_id: String(lote.job_id), lote_id: String(lote.id),
+    });
+    await admin.from('analise_lotes').update({ queue_msg_id: msgId }).eq('id', lote.id);
+  }
+  return lotes?.length || 0;
+}
+
+async function registrarFalhaDefinitiva(fila: QueueMessage, error: unknown) {
+  const detalhe = error instanceof Error ? error.message : String(error);
+  if (fila.message.tipo === 'classificar_lote' && fila.message.lote_id) {
+    await atualizarLote(fila.message.lote_id, {
+      status: 'falhou',
+      erro: `Mensagem abandonada após ${fila.read_ct || 8} tentativas: ${detalhe}`,
+      finished_at: agoraIso(),
+      proxima_tentativa: null,
+    });
+    return;
+  }
+
+  const { data: job, error: jobError } = await admin.from('analise_jobs')
+    .select('*').eq('id', fila.message.job_id).maybeSingle();
+  if (jobError) throw new Error(jobError.message);
+  if (job && job.status !== 'cancelado') {
+    await fallbackBatchParaFila(job, `Processamento Batch retomado pela fila: ${detalhe}`);
+  }
+}
+
 async function processarFila() {
   const inicio = Date.now();
   let processadas = 0;
   let interrompidaPorTempo = false;
+
+  try {
+    await recuperarLotesAbandonados();
+  } catch (error) {
+    console.error('Não foi possível verificar lotes interrompidos:', error);
+  }
 
   while (processadas < MAX_MENSAGENS_EXECUCAO) {
     if (Date.now() - inicio > TEMPO_MAXIMO_EXECUCAO_MS) {
@@ -619,7 +689,17 @@ async function processarFila() {
       console.error(`Falha inesperada na mensagem ${fila.msg_id}:`, error);
       const tentativas = Number(fila.read_ct || 0);
       if (tentativas >= 8) {
-        await rpc('worker_descartar_mensagem', { p_msg_id: fila.msg_id });
+        try {
+          await registrarFalhaDefinitiva(fila, error);
+          await rpc('worker_descartar_mensagem', { p_msg_id: fila.msg_id });
+        } catch (registroError) {
+          console.error(`Não foi possível encerrar a mensagem ${fila.msg_id}:`, registroError);
+          await rpc('worker_reagendar_mensagem', {
+            p_msg_id: fila.msg_id,
+            p_mensagem: fila.message,
+            p_atraso_segundos: 120,
+          });
+        }
       } else {
         await rpc('worker_reagendar_mensagem', {
           p_msg_id: fila.msg_id,

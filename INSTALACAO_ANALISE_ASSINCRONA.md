@@ -136,9 +136,24 @@ where jobname = 'processar-analise-queue-cada-minuto';
 ## Comportamento de recuperação
 
 - `429`: mensagem volta à queue com atraso e `proxima_tentativa`.
-- Encerramento inesperado do worker: a visibilidade expira e a mensagem reaparece.
+- Chamadas de IA acima de 70 segundos: são interrompidas e reagendadas automaticamente.
+- Encerramento inesperado do worker: lotes em `processando` há mais de três minutos são recolocados na fila.
+- Tela aberta com job ativo: envia um pulso ao worker a cada 30 segundos.
+- Botão **Retomar agora**: permite acionar a fila manualmente sem criar outro job e sem perder os lotes concluídos.
 - Resposta incompleta: o lote é tentado novamente sem apagar os já concluídos.
 - Baixa confiança: somente os itens ambíguos são refinados pelo Flash.
 - Falha do Groq: o mesmo lote segue pelo Flash-Lite.
 - Falha/expiração do Batch: somente lotes pendentes migram para a fila rápida.
 - Navegador fechado: job, snapshot, progresso e resultados continuam no banco.
+
+## Se o percentual ficar parado
+
+Depois de atualizar o projeto, publique novamente o worker:
+
+```powershell
+npx supabase functions deploy analise-worker
+```
+
+Publique também o frontend. Abra **Analisar provas**, localize o processamento ativo e clique em
+**Retomar agora**. O mesmo job continuará do percentual salvo; não é necessário enviar as provas ou
+criar outra classificação.

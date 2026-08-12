@@ -135,6 +135,7 @@ export function serializarDocumentos(documentos) {
         visual_analisado: Boolean(q.visualAnalisado),
         descricao_visual: q.descricaoVisual || null,
         modelo_visual: q.modeloVisual || null,
+        imagem_storage_path: q.imagemStoragePath || null,
       },
     })),
   }));

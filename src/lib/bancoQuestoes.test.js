@@ -73,6 +73,7 @@ describe('publicação e testes', () => {
       dificuldade: 'media',
       confianca: 0.91,
     },
+    imagemStoragePath: 'usuario/prova/questao-001.webp',
   };
 
   it('bloqueia questão incompleta e prepara questão válida com alternativas limpas', () => {
@@ -93,6 +94,7 @@ describe('publicação e testes', () => {
       alternativas: ['Um', 'Dois', 'Três', 'Quatro', 'Cinco'],
       materia_id: 'materia-1',
       subgenero_id: 'assunto-1',
+      imagem_url: 'usuario/prova/questao-001.webp',
     });
   });
 
@@ -111,6 +113,30 @@ describe('publicação e testes', () => {
 
     expect(validacao.pronta).toBe(false);
     expect(validacao.pendencias).toContain('alternativa contém texto de outra questão');
+  });
+
+  it('não aprova questão visual sem a figura armazenada', () => {
+    const validacao = validarQuestaoParaBanco({
+      ...questao,
+      letras: ['A', 'B', 'C', 'D', 'E'],
+      dependeDeVisual: true,
+      visualAnalisado: true,
+      imagemStoragePath: null,
+    }, [materia]);
+
+    expect(validacao.pendencias).toContain('recurso visual ainda não extraído');
+  });
+
+  it('aprova a etapa visual quando o recorte foi armazenado', () => {
+    const validacao = validarQuestaoParaBanco({
+      ...questao,
+      letras: ['A', 'B', 'C', 'D', 'E'],
+      dependeDeVisual: true,
+      visualAnalisado: true,
+      imagemStoragePath: 'usuario/prova/questao-001.webp',
+    }, [materia]);
+
+    expect(validacao.pendencias).not.toContain('figura ainda não extraída');
   });
 
   it('prioriza questões com maior taxa de erro', () => {

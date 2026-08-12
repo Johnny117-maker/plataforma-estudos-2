@@ -99,10 +99,13 @@ export function criarSnapshotDocumentos(documentos) {
     selecionado: doc.selecionado !== false,
     avisos: doc.avisos || [],
     modeloVisual: doc.modeloVisual || null,
-    questoes: (doc.questoes || []).map((questao) => ({
-      ...questao,
-      selecionada: questao.selecionada !== false,
-    })),
+    questoes: (doc.questoes || []).map((questao) => {
+      const { imagemBlob: _imagemBlob, imagemPreviewUrl: _imagemPreviewUrl, ...serializavel } = questao;
+      return {
+        ...serializavel,
+        selecionada: questao.selecionada !== false,
+      };
+    }),
   }));
 }
 

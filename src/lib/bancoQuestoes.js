@@ -4,7 +4,7 @@ const LETRAS = 'ABCDE';
 // instrução que abre um bloco compartilhado. Isso é uma defesa adicional à
 // segmentação: se um PDF novo tiver diagramação inesperada, a questão fica em
 // revisão em vez de contaminar o banco e os simulados.
-const RE_TEXTO_DE_OUTRA_QUESTAO = /\bquest[ãa]o\s+\d{1,3}\b|\b(?:leia|texto|considere|observe|analise)\b.{0,160}\bquest[õo]es?\s+\d{1,3}\b/is;
+const RE_TEXTO_DE_OUTRA_QUESTAO = /\bquest[ãa]o\s+\d{1,3}\b|\b(?:leia|texto|considere|observe|analise)\b.{0,220}\bquest[õo]es?\s+\d{1,3}\b|\bVESTIBULAR\b/is;
 
 const MATERIAS_GABARITO = [
   ['História Brasileira', ['historia brasileira', 'historia do brasil']],
@@ -250,6 +250,9 @@ export function validarQuestaoParaBanco(questao, materias = []) {
   if (!Number.isInteger(Number(questao?.numero)) || Number(questao.numero) < 1) pendencias.push('sem número');
   if (String(questao?.enunciado || '').trim().length < 40) pendencias.push('enunciado incompleto');
   if (alternativas.length !== 5) pendencias.push(`${alternativas.length}/5 alternativas`);
+  if (Array.isArray(questao?.letras) && questao.letras.join('').toUpperCase() !== 'ABCDE') {
+    pendencias.push('ordem das alternativas inválida');
+  }
   if (alternativasOriginais.some((alternativa) => RE_TEXTO_DE_OUTRA_QUESTAO.test(String(alternativa)))) {
     pendencias.push('alternativa contém texto de outra questão');
   }
@@ -257,6 +260,9 @@ export function validarQuestaoParaBanco(questao, materias = []) {
   if (!materia) pendencias.push('matéria ainda não classificada');
   if (questao?.dependeDeVisual && !questao?.visualAnalisado && !questao?.descricaoVisual) {
     pendencias.push('elemento visual não revisado');
+  }
+  if (questao?.dependeDeVisual && !questao?.imagemStoragePath) {
+    pendencias.push('recurso visual ainda não extraído');
   }
 
   return { pronta: pendencias.length === 0, pendencias, alternativas, letra, materia };
@@ -298,6 +304,7 @@ export function prepararProvasParaBanco(documentos, materias, nomeAnalise = 'Ban
         confianca: questao.classificacao?.confianca ?? null,
         depende_de_visual: Boolean(questao.dependeDeVisual),
         descricao_visual: questao.descricaoVisual || null,
+        imagem_url: questao.imagemStoragePath || null,
         gabarito_retificado: Boolean(questao.gabaritoRetificado),
       });
       prontas += 1;

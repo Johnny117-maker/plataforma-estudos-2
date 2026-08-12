@@ -15,6 +15,11 @@ import {
 import { limparLinhas, segmentarQuestoes, PERFIS } from '../lib/segmentarProva';
 import { religarCabecalhos, mapearAreas, aplicarAreas } from '../lib/areasProva';
 import { aplicarCache } from '../lib/cacheClassificacao';
+import {
+  capturarImagensQuestoesPdf,
+  salvarCapturasQuestoes,
+  salvarImagensPendentes,
+} from '../lib/questaoImagem';
 import { aplicarDescricoesVisuais } from '../lib/documentoVisual';
 import {
   aplicarGabaritoNaProva,
@@ -36,7 +41,10 @@ import {
   STATUS_JOB_ATIVOS,
   STATUS_JOB_FINAIS,
 } from '../lib/analiseAssincrona';
-import { publicarBancoQuestoes, salvarAnaliseProvas } from '../lib/transactionService';
+import {
+  publicarBancoQuestoes,
+  salvarAnaliseProvas,
+} from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
 
 const MAX_ARQUIVOS = 20;
@@ -94,10 +102,12 @@ function rotuloConteudo(item, indice) {
 export default function AnalisarProva() {
   const inputRef = useRef(null);
   const resultadoCarregadoRef = useRef(null);
+  const ultimoPulsoWorkerRef = useRef(0);
   const [perfil, setPerfil] = useState('auto');
   const [tipoUpload, setTipoUpload] = useState('prova');
   const [modoProcessamento, setModoProcessamento] = useState('auto');
   const [usarGroq, setUsarGroq] = useState(false);
+  const [capturarImagens, setCapturarImagens] = useState(true);
   const [documentos, setDocumentos] = useState([]);
   const [materias, setMaterias] = useState([]);
   const [jobs, setJobs] = useState([]);
@@ -147,7 +157,18 @@ export default function AnalisarProva() {
             ? `${concluidos} conteúdos classificados e ${falhos} pendentes. O resultado disponível foi restaurado.`
             : `${concluidos} conteúdos classificados em segundo plano. Resultado restaurado.`);
         }
-        if (finalizado) setJobAtivo(null);
+        if (finalizado) {
+          setJobAtivo(null);
+        } else if (Date.now() - ultimoPulsoWorkerRef.current >= 30_000) {
+          // O polling também funciona como pulso de recuperação. Assim, uma
+          // falha momentânea do cron ou da auto-invocação não deixa o job
+          // parado enquanto esta tela estiver aberta.
+          ultimoPulsoWorkerRef.current = Date.now();
+          acordarWorkerAnalise().catch(() => {
+            // O cron continua como segunda linha de recuperação. Evita exibir
+            // o mesmo erro transitório a cada atualização da tela.
+          });
+        }
       } catch (pollError) {
         if (!desmontado) setErro(`Não foi possível atualizar o job: ${pollError.message}`);
       }
@@ -284,6 +305,41 @@ export default function AnalisarProva() {
               }
             } catch (visualError) {
               avisos.push(`Análise visual indisponível: ${visualError.message}. O texto extraído foi mantido.`);
+            }
+          }
+
+          if (capturarImagens && extracao.tipo === 'pdf' && questoesDetectadas.length) {
+            try {
+              setProgresso(`${file.name}: extraindo figuras, gráficos e diagramas…`);
+              const capturas = await capturarImagensQuestoesPdf(
+                file,
+                questoesDetectadas,
+                (pagina, total) => setProgresso(`${file.name}: recortando páginas ${pagina}/${total}`)
+              );
+              if (capturas.length) {
+                let imagens;
+                try {
+                  imagens = await salvarCapturasQuestoes(hash, capturas);
+                } catch (storageError) {
+                  imagens = new Map(capturas.map((captura) => [String(captura.id), {
+                    imagemBlob: captura.blob,
+                    imagemPreviewUrl: URL.createObjectURL(captura.blob),
+                    imagemLargura: captura.largura,
+                    imagemAltura: captura.altura,
+                    imagemTipoCaptura: captura.tipoCaptura,
+                  }]));
+                  avisos.push(`As imagens foram capturadas localmente, mas ainda não foram enviadas: ${storageError.message}`);
+                }
+                questoesDetectadas = questoesDetectadas.map((questao) => ({
+                  ...questao,
+                  ...(imagens.get(String(questao.id)) || {}),
+                }));
+                avisos.push(`${capturas.length} questão(ões) receberam o recurso visual associado extraído do PDF.`);
+              } else if (questoesDetectadas.some((questao) => questao.dependeDeVisual)) {
+                avisos.push('Nenhuma região gráfica pôde ser isolada automaticamente; confira as questões visuais antes de publicar.');
+              }
+            } catch (captureError) {
+              avisos.push(`Captura das questões indisponível: ${captureError.message}`);
             }
           }
 
@@ -614,19 +670,37 @@ export default function AnalisarProva() {
     }
   }
 
+  async function retomarJobAgora() {
+    setErro('');
+    try {
+      ultimoPulsoWorkerRef.current = Date.now();
+      await acordarWorkerAnalise();
+      setAviso('A fila foi acionada novamente. O percentual será atualizado assim que o próximo lote terminar.');
+    } catch (error) {
+      setErro(`Não foi possível retomar agora: ${error.message}`);
+    }
+  }
+
   async function publicarNoBanco() {
     setErro('');
     setProcessando(true);
-    setProgresso('Publicando questões aprovadas no banco…');
+    setProgresso('Preparando imagens e questões aprovadas…');
     try {
-      const payload = prepararProvasParaBanco(documentos, materias, nome, analiseId);
+      const documentosPublicacao = await salvarImagensPendentes(documentos, (documento, quantidade) => {
+        setProgresso(`Enviando ${quantidade} imagem(ns) de ${documento.nome}…`);
+      });
+      setDocumentos(documentosPublicacao);
+      const payload = prepararProvasParaBanco(documentosPublicacao, materias, nome, analiseId);
       if (!payload.prontas) {
         throw new Error('Nenhuma questão está pronta. Vincule o gabarito, classifique e resolva as pendências marcadas.');
       }
+      setProgresso('Publicando questões aprovadas no banco…');
       const resultado = await publicarBancoQuestoes(nome, payload.provas);
+      const imagensVinculadas = Number(resultado.imagens_vinculadas || 0);
       setAviso(
         `${resultado.questoes_inseridas || 0} questão(ões) adicionadas ao banco. `
         + `${resultado.questoes_duplicadas || 0} duplicada(s) foram preservadas sem nova cópia. `
+        + `${imagensVinculadas} imagem(ns) vinculada(s). `
         + `${payload.revisar || 0} continuam aguardando revisão.`
       );
     } catch (error) {
@@ -681,6 +755,14 @@ export default function AnalisarProva() {
             onChange={(event) => setUsarGroq(event.target.checked)}
           />
           <span>Usar Groq como acelerador opcional</span>
+        </label>
+        <label className="toggle-inline">
+          <input
+            type="checkbox"
+            checked={capturarImagens}
+            onChange={(event) => setCapturarImagens(event.target.checked)}
+          />
+          <span>Extrair figuras e gráficos das questões</span>
         </label>
         <input
           value={nome}
@@ -763,9 +845,14 @@ export default function AnalisarProva() {
                       {ativo ? 'Abrir progresso' : 'Abrir resultado'}
                     </button>
                     {ativo && (
-                      <button className="btn btn-danger-text" type="button" onClick={() => cancelarJob(job.id)}>
-                        Cancelar
-                      </button>
+                      <>
+                        <button className="btn" type="button" onClick={retomarJobAgora}>
+                          Retomar agora
+                        </button>
+                        <button className="btn btn-danger-text" type="button" onClick={() => cancelarJob(job.id)}>
+                          Cancelar
+                        </button>
+                      </>
                     )}
                   </div>
                 </article>
@@ -920,7 +1007,7 @@ export default function AnalisarProva() {
                                 <div className="content-badges">
                                   {item.pagina && <span>Página {item.pagina}</span>}
                                   {item.gabarito && <span>Gabarito {item.gabarito}{item.gabaritoRetificado ? ' · retificado' : ''}</span>}
-                                  {item.dependeDeVisual && !item.visualAnalisado && <span>depende de figura</span>}
+                                  {item.dependeDeVisual && !item.visualAnalisado && <span>depende de recurso visual</span>}
                                   {item.visualAnalisado && <span>visual analisado pelo Gemini</span>}
                                   {item.materiaConhecida && !item.classificacao && (
                                     <span>{item.materiaConhecida} · do caderno</span>
@@ -964,6 +1051,12 @@ export default function AnalisarProva() {
                                   <span>Incluir no banco de questões</span>
                                 </label>
                               </div>
+                              {item.imagemPreviewUrl && (
+                                <figure className="question-capture-preview">
+                                  <img src={item.imagemPreviewUrl} alt={`Figura extraída da questão ${item.numero || indice + 1}`} />
+                                  <figcaption>Recurso visual que será exibido em Perguntas e Respostas</figcaption>
+                                </figure>
+                              )}
                               <textarea
                                 rows="5"
                                 value={item.paraClassificar || ''}
@@ -1016,7 +1109,7 @@ export default function AnalisarProva() {
           {baixaConfianca > 0 && (
             <p className="selection-help">
               {baixaConfianca} classificação(ões) com confiança abaixo de 0,6, marcadas em vermelho na lista.
-              Costumam ser questões que dependem de figura — vale conferir antes de salvar.
+              Costumam ser questões que dependem de imagem, gráfico ou diagrama — vale conferir antes de salvar.
             </p>
           )}
 

@@ -84,7 +84,12 @@ export default function Quiz({ perguntas, userId, testeId = null, onFinalizar, o
         </div>
       )}
       <div className="quiz-question">{pergunta.enunciado}</div>
-      {pergunta.imagem_url && <img className="quiz-image" src={pergunta.imagem_url} alt="Elemento visual da questão" />}
+      {pergunta.imagem_assinada_url && (
+        <figure className="quiz-original-figure">
+          <img className="quiz-image" src={pergunta.imagem_assinada_url} alt="Figura associada à questão" />
+          <figcaption>Figura extraída do documento original</figcaption>
+        </figure>
+      )}
       {pergunta.possui_elemento_visual && pergunta.metadados?.descricao_visual && (
         <div className="answer-review">Descrição do elemento visual: {pergunta.metadados.descricao_visual}</div>
       )}

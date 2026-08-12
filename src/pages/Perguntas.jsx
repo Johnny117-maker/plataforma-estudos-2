@@ -5,7 +5,8 @@ import PerguntaModal from '../components/PerguntaModal.jsx';
 import Quiz from '../components/Quiz.jsx';
 import { importarQuestaoExemplo } from '../lib/perguntasSeedExemplo';
 import { embaralharQuestoes } from '../lib/bancoQuestoes';
-import { concluirTesteBanco, criarTesteBanco } from '../lib/transactionService';
+import { assinarImagensPerguntas, removerTodasImagensQuestoes } from '../lib/questaoImagem';
+import { concluirTesteBanco, criarTesteBanco, limparBancoQuestoes } from '../lib/transactionService';
 
 const DIFICULDADE_LABEL = { facil: 'Fácil', media: 'Média', dificil: 'Difícil' };
 
@@ -18,6 +19,7 @@ export default function Perguntas() {
   const [loading, setLoading] = useState(true);
   const [modalPergunta, setModalPergunta] = useState(undefined);
   const [mensagem, setMensagem] = useState('');
+  const [limpando, setLimpando] = useState(false);
 
   const [filtroMateria, setFiltroMateria] = useState('');
   const [filtroSubgenero, setFiltroSubgenero] = useState('');
@@ -36,7 +38,7 @@ export default function Perguntas() {
       supabase.from('historico_respostas').select('pergunta_id,correta').order('respondido_em', { ascending: false }).limit(5000),
     ]);
     setMaterias(mData || []);
-    setPerguntas(pData || []);
+    setPerguntas(await assinarImagensPerguntas(pData || []));
     setProvas(provasData || []);
     setHistorico(historicoData || []);
     setLoading(false);
@@ -94,6 +96,40 @@ export default function Perguntas() {
     if (r.ok) carregar();
   }
 
+  async function limparTudo() {
+    setMensagem('');
+    const confirmou = window.confirm(
+      'Isso removerá todas as perguntas, simulados, respostas, provas e gabaritos do banco de questões. Matérias, cronogramas e análises serão preservados. Deseja continuar?'
+    );
+    if (!confirmou) return;
+    const texto = window.prompt('Para confirmar a limpeza definitiva, digite LIMPAR:');
+    if (texto !== 'LIMPAR') {
+      setMensagem('Limpeza cancelada: a confirmação não corresponde a LIMPAR.');
+      return;
+    }
+
+    setLimpando(true);
+    try {
+      const resultado = await limparBancoQuestoes();
+      let avisoImagem = '';
+      try {
+        await removerTodasImagensQuestoes();
+      } catch (error) {
+        avisoImagem = ` Os registros foram limpos, mas alguns arquivos de imagem não puderam ser removidos: ${error.message}`;
+      }
+      setQuizAtivo(null);
+      setMensagem(
+        `${resultado?.perguntas_removidas || 0} pergunta(s), ${resultado?.testes_removidos || 0} teste(s) e `
+        + `${resultado?.provas_removidas || 0} prova(s) removidos.${avisoImagem}`
+      );
+      await carregar();
+    } catch (error) {
+      setMensagem(`Não foi possível limpar o banco de questões: ${error.message}`);
+    } finally {
+      setLimpando(false);
+    }
+  }
+
   if (loading) return <div className="empty-state">Carregando…</div>;
 
   if (materias.length === 0) {
@@ -124,6 +160,9 @@ export default function Perguntas() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Banco de questões e simulados</h2>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-danger-text" disabled={limpando} onClick={limparTudo}>
+            {limpando ? 'Limpando…' : 'Limpar banco de questões'}
+          </button>
           <button className="btn" onClick={importarExemplo}>Importar questão de exemplo</button>
           <button className="btn btn-primary" onClick={() => setModalPergunta(null)}>+ Nova pergunta</button>
         </div>

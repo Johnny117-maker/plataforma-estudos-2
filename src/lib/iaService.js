@@ -16,7 +16,12 @@ const MODELOS = {
 const MAX_CHARS_QUESTAO = 1_400;
 const MAX_TENTATIVAS = 4;
 const ESPERA_MAXIMA_MS = 70_000;
-const FIM_LLAMA_31 = Date.parse('2026-08-17T00:00:00Z');
+// A Groq descontinuou o llama-3.1-8b-instant: anúncio em 2026-06-17, desligamento
+// em 2026-08-16, com openai/gpt-oss-20b como substituto oficial. A partir dessa
+// data paramos de rotear preventivamente para o Llama; o servidor ainda faz
+// fallback por 410, mas manter a rota só desperdiçaria uma requisição por lote.
+// Ref.: https://console.groq.com/docs/deprecations
+const FIM_LLAMA_31 = Date.parse('2026-08-16T00:00:00Z');
 let proximoModelo = 0;
 let groqIndisponivelAte = 0;
 

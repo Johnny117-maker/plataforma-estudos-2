@@ -264,22 +264,21 @@ async function processarPagina(prefixo: string, numero: number, textoPagina: str
   return { pagina: numero, questoes: saida };
 }
 
-async function processarJob(job: {
-  id: string;
-  storage_prefix: string;
-  total_paginas: number;
-  paginas_processadas: number;
-}, prazoFinal: number) {
+type JobLote = { id: string; storage_prefix: string; total_paginas: number; paginas_processadas: number };
+
+// Processa um lote de páginas (orçamento de páginas e de tempo). Devolve se o
+// job ficou completo.
+async function processarLote(job: JobLote, prazoFinal: number) {
   const pdfBytes = await baixarBytes(`${job.storage_prefix}/original.pdf`);
   const pdf = await getDocumentProxy(pdfBytes);
   const extraido = await extractText(pdf, { mergePages: false });
   const textos: string[] = Array.isArray(extraido.text) ? extraido.text.map(String) : [String(extraido.text || '')];
 
-  let processadasNaExecucao = 0;
+  let processadas = job.paginas_processadas;
   for (
     let numero = job.paginas_processadas + 1;
     numero <= job.total_paginas
-    && processadasNaExecucao < MAX_PAGINAS_POR_EXECUCAO
+    && (numero - job.paginas_processadas) <= MAX_PAGINAS_POR_EXECUCAO
     && Date.now() < prazoFinal;
     numero += 1
   ) {
@@ -289,30 +288,58 @@ async function processarJob(job: {
       p_pagina: resultadoPagina,
     });
     if (error) throw new Error(`Falha ao gravar a página ${numero}: ${error.message}`);
-    processadasNaExecucao += 1;
+    processadas = numero;
   }
-  return processadasNaExecucao;
+  return { done: processadas >= job.total_paginas };
 }
 
-async function processarFila() {
-  const prazoFinal = Date.now() + TEMPO_MAXIMO_EXECUCAO_MS;
-  let jobsProcessados = 0;
+// Re-invoca o próprio worker para continuar um job que não coube em uma
+// execução. É a continuação imediata; o cron é a rede de segurança.
+function invocarSelf(jobId: string) {
+  return fetch(`${SUPABASE_URL}/functions/v1/analise-visao-worker`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+    },
+    body: JSON.stringify({ job_id: jobId }),
+  }).then(() => {}).catch(() => {});
+}
 
+async function processarComContinuacao(job: JobLote, prazoFinal: number) {
+  try {
+    const { done } = await processarLote(job, prazoFinal);
+    if (!done) EdgeRuntime.waitUntil(invocarSelf(job.id));
+  } catch (erro) {
+    await admin.rpc('falhar_analysis_job', {
+      p_job_id: job.id,
+      p_erro: erro instanceof Error ? erro.message : 'Falha ao processar a prova.',
+    });
+  }
+}
+
+// Continua um job específico (chamado pela auto-continuação), sem passar pelo
+// claim — o job já está 'processing' e pertence a esta cadeia de execução.
+async function continuarJob(jobId: string, prazoFinal: number) {
+  const { data } = await admin.from('analysis_jobs')
+    .select('id, storage_prefix, total_paginas, paginas_processadas, status')
+    .eq('id', jobId)
+    .maybeSingle();
+  if (!data || data.status !== 'processing') return false;
+  await processarComContinuacao(data as JobLote, prazoFinal);
+  return true;
+}
+
+async function processarFila(prazoFinal: number) {
+  let jobsProcessados = 0;
   while (Date.now() < prazoFinal) {
     const { data, error } = await admin.rpc('reivindicar_analysis_job');
     if (error) throw new Error(`Falha ao reivindicar job: ${error.message}`);
     const job = Array.isArray(data) ? data[0] : data;
     if (!job) break;
-
-    try {
-      await processarJob(job, prazoFinal);
-      jobsProcessados += 1;
-    } catch (erro) {
-      await admin.rpc('falhar_analysis_job', {
-        p_job_id: job.id,
-        p_erro: erro instanceof Error ? erro.message : 'Falha ao processar a prova.',
-      });
-    }
+    await processarComContinuacao(job as JobLote, prazoFinal);
+    jobsProcessados += 1;
   }
   return jobsProcessados;
 }
@@ -324,8 +351,14 @@ Deno.serve(async (req) => {
     return json({ erro: 'Worker não configurado (service role ou Gemini ausente).' }, 503);
   }
 
+  const prazoFinal = Date.now() + TEMPO_MAXIMO_EXECUCAO_MS;
   try {
-    const jobsProcessados = await processarFila();
+    const corpo = await req.json().catch(() => ({} as Record<string, unknown>));
+    if (corpo && typeof corpo.job_id === 'string') {
+      const continuado = await continuarJob(corpo.job_id, prazoFinal);
+      return json({ ok: true, continuado });
+    }
+    const jobsProcessados = await processarFila(prazoFinal);
     return json({ ok: true, jobsProcessados });
   } catch (erro) {
     return json({ erro: erro instanceof Error ? erro.message : 'Falha inesperada no worker.' }, 500);

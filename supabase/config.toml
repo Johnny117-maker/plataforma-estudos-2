@@ -4,6 +4,9 @@ verify_jwt = true
 [functions.analise-worker]
 verify_jwt = true
 
+[functions.analisar-estrutura]
+verify_jwt = true
+
 [functions.analise-visao-worker]
 verify_jwt = true
 

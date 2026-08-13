@@ -243,7 +243,11 @@ function extrairPartes(corpo, perfil) {
 
   const letras = [];
   for (const alternativa of alternativas) {
-    const m = perfil.alternativa.exec(alternativa);
+    // A alternativa pode ter quebrado em várias linhas; o marcador "(A)" está
+    // sempre na primeira. Testar a string inteira falharia pela âncora `$` da
+    // regex (o `.` não cruza `\n`), descartando a letra e disparando o aviso de
+    // "conjunto incompleto" mesmo com as cinco alternativas corretas.
+    const m = perfil.alternativa.exec(alternativa.split('\n', 1)[0]);
     if (m) letras.push(m[1]);
   }
 

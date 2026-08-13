@@ -330,7 +330,7 @@ async function baixarBytes(caminho: string) {
   return new Uint8Array(await data.arrayBuffer());
 }
 
-async function processarPagina(prefixo: string, numero: number, textoPagina: string) {
+async function processarPagina(prefixo: string, numero: number, textoPagina: string, predominanteNativo: boolean) {
   // Página com texto nativo suficiente: extração textual barata, sem visão.
   if (textoPagina.trim().length >= MINIMO_CHARS_POR_PAGINA) {
     const questoes = await extrairQuestoesDeTexto(textoPagina, numero);
@@ -345,6 +345,13 @@ async function processarPagina(prefixo: string, numero: number, textoPagina: str
         imagens: [],
       })),
     };
+  }
+
+  // Numa prova predominantemente de texto nativo, uma página com pouco texto é
+  // capa/rascunho/verso — não tem questão. Registra vazia, sem gastar visão
+  // (era o que travava o job na última página).
+  if (predominanteNativo) {
+    return { pagina: numero, origem: 'vazia', questoes: [] };
   }
 
   // Página escaneada/imagem: visão + recortes.
@@ -395,6 +402,12 @@ async function processarLote(job: JobLote, prazoFinal: number) {
   const extraido = await extractText(pdf, { mergePages: false });
   const textos: string[] = Array.isArray(extraido.text) ? extraido.text.map(String) : [String(extraido.text || '')];
 
+  // Se a maioria das páginas tem texto nativo, o PDF é textual: páginas de pouco
+  // texto são capas/rascunhos, não escaneadas. Só um PDF majoritariamente sem
+  // texto (escaneado) manda páginas para a visão.
+  const comTexto = textos.filter((t) => (t || '').trim().length >= MINIMO_CHARS_POR_PAGINA).length;
+  const predominanteNativo = job.total_paginas > 0 && comTexto / job.total_paginas >= 0.5;
+
   let processadas = job.paginas_processadas;
   for (
     let numero = job.paginas_processadas + 1;
@@ -404,7 +417,7 @@ async function processarLote(job: JobLote, prazoFinal: number) {
     numero += 1
   ) {
     try {
-      const resultadoPagina = await processarPagina(job.storage_prefix, numero, textos[numero - 1] || '');
+      const resultadoPagina = await processarPagina(job.storage_prefix, numero, textos[numero - 1] || '', predominanteNativo);
       const { error } = await admin.rpc('anexar_pagina_analysis_job', {
         p_job_id: job.id,
         p_pagina: resultadoPagina,

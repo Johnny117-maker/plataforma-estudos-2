@@ -14,6 +14,7 @@ const Perguntas = lazy(() => import('./pages/Perguntas.jsx'));
 const DatasImportantes = lazy(() => import('./pages/DatasImportantes.jsx'));
 const CriarCronogramaIA = lazy(() => import('./pages/CriarCronogramaIA.jsx'));
 const AnalisarProva = lazy(() => import('./pages/AnalisarProva.jsx'));
+const AnalisarProvaVisao = lazy(() => import('./pages/AnalisarProvaVisao.jsx'));
 const HistoricoProcessamentos = lazy(() => import('./pages/HistoricoProcessamentos.jsx'));
 const CriarCronogramaAdaptativo = lazy(() => import('./pages/CriarCronogramaAdaptativo.jsx'));
 
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/ia/novo-cronograma" element={<CriarCronogramaIA />} />
           <Route path="/cronogramas/novo-adaptativo" element={<CriarCronogramaAdaptativo />} />
           <Route path="/provas" element={<AnalisarProva />} />
+          <Route path="/provas-visao" element={<AnalisarProvaVisao />} />
           <Route path="/processamentos" element={<HistoricoProcessamentos />} />
           <Route path="/notas" element={<Notas />} />
           <Route path="/tarefas" element={<Tarefas />} />

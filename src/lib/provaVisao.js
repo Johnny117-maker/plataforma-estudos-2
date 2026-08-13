@@ -6,11 +6,34 @@
 // de visão e persiste as questões estruturadas. Nada de chave de IA aqui.
 
 import { supabase } from '../supabaseClient';
+import { extrairDeArquivo } from './extrairTexto';
 
 export const BUCKET_PROVAS_VISAO = 'provas-visao';
 export const DPI_MIN = 180;
 export const DPI_MAX = 220;
 export const DPI_PADRAO = 200;
+export const MINIMO_CHARS_POR_PAGINA = 200;
+
+/** Uma prova é "escaneada" (candidata à visão) quando tem pouco texto por página. */
+export function ehEscaneado(totalCaracteres, totalPaginas, minimo = MINIMO_CHARS_POR_PAGINA) {
+  const paginas = Math.max(1, Number(totalPaginas) || 1);
+  return (Number(totalCaracteres) || 0) / paginas < minimo;
+}
+
+/**
+ * Avalia se o PDF PRECISA da pipeline de visão. Provas com texto nativo devem
+ * ir para a análise padrão (texto), mais rápida e sem cota de IA.
+ * Devolve { escaneado, charsPorPagina, totalPaginas }.
+ */
+export async function avaliarPdfParaVisao(arquivoPdf) {
+  const resultado = await extrairDeArquivo(arquivoPdf);
+  const totalPaginas = resultado.totalPaginas || 1;
+  return {
+    escaneado: ehEscaneado(resultado.totalCaracteres, totalPaginas),
+    charsPorPagina: Math.round((resultado.totalCaracteres || 0) / Math.max(1, totalPaginas)),
+    totalPaginas,
+  };
+}
 
 /** DPI sempre dentro da faixa combinada (180–220), inteiro. */
 export function clampDpi(valor) {

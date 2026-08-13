@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   clampDpi, escalaDpi, caminhoPdf, caminhoPaginaPng,
-  bboxParaPixels, resumirResultadoVisao,
-  DPI_MIN, DPI_MAX, DPI_PADRAO,
+  bboxParaPixels, resumirResultadoVisao, ehEscaneado,
+  DPI_MIN, DPI_MAX, DPI_PADRAO, MINIMO_CHARS_POR_PAGINA,
 } from './provaVisao';
 
 describe('clampDpi', () => {
@@ -68,6 +68,28 @@ describe('bboxParaPixels', () => {
     const r = bboxParaPixels([0.5, 0.5, 0.5, 0.5], 800, 600);
     expect(r.w).toBeGreaterThanOrEqual(1);
     expect(r.h).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('ehEscaneado', () => {
+  it('considera escaneado quando há pouco texto por página', () => {
+    // 24 páginas com ~50 chars/página → escaneado
+    expect(ehEscaneado(1200, 24)).toBe(true);
+  });
+
+  it('considera texto nativo quando há bastante texto por página', () => {
+    // prova real: ~2900 chars/página → NÃO é escaneado
+    expect(ehEscaneado(70000, 24)).toBe(false);
+  });
+
+  it('usa o limite na fronteira', () => {
+    expect(ehEscaneado(MINIMO_CHARS_POR_PAGINA * 10, 10)).toBe(false); // exatamente no limite
+    expect(ehEscaneado(MINIMO_CHARS_POR_PAGINA * 10 - 1, 10)).toBe(true);
+  });
+
+  it('trata total de páginas inválido sem dividir por zero', () => {
+    expect(ehEscaneado(0, 0)).toBe(true);
+    expect(ehEscaneado(500, 0)).toBe(false);
   });
 });
 

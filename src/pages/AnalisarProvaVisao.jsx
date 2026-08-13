@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   DPI_MAX, DPI_MIN, DPI_PADRAO,
-  enviarProvaParaAnalise, listarAnalysisJobs,
+  avaliarPdfParaVisao, enviarProvaParaAnalise, listarAnalysisJobs,
 } from '../lib/provaVisao';
 
 const ROTULO_FASE = {
@@ -21,6 +22,9 @@ const ROTULO_STATUS = {
 
 export default function AnalisarProvaVisao() {
   const [arquivo, setArquivo] = useState(null);
+  const [avaliacao, setAvaliacao] = useState(null);
+  const [avaliando, setAvaliando] = useState(false);
+  const [forcar, setForcar] = useState(false);
   const [dpi, setDpi] = useState(DPI_PADRAO);
   const [enviando, setEnviando] = useState(false);
   const [progresso, setProgresso] = useState(null);
@@ -45,14 +49,33 @@ export default function AnalisarProvaVisao() {
     return () => clearInterval(timer);
   }, [jobs]);
 
+  async function selecionarArquivo(file) {
+    setArquivo(file || null);
+    setAvaliacao(null);
+    setForcar(false);
+    setErro('');
+    if (!file) return;
+    setAvaliando(true);
+    try {
+      setAvaliacao(await avaliarPdfParaVisao(file));
+    } catch (e) {
+      setErro(`Não foi possível avaliar o PDF: ${e.message}`);
+    } finally {
+      setAvaliando(false);
+    }
+  }
+
+  const textoNativo = avaliacao && !avaliacao.escaneado;
+  const bloqueado = textoNativo && !forcar;
+
   async function enviar() {
-    if (!arquivo) return;
+    if (!arquivo || bloqueado) return;
     setEnviando(true);
     setErro('');
     setProgresso(null);
     try {
       await enviarProvaParaAnalise(arquivo, { dpi, onProgresso: setProgresso });
-      setArquivo(null);
+      selecionarArquivo(null);
       await carregarJobs();
     } catch (e) {
       setErro(e.message);
@@ -72,9 +95,9 @@ export default function AnalisarProvaVisao() {
     <div className="page">
       <h1>Analisar prova (visão)</h1>
       <p className="selection-help">
-        Novo pipeline: o PDF e uma imagem de cada página ({DPI_MIN}–{DPI_MAX} DPI) são enviados para o
-        armazenamento seguro e um job entra na fila. O worker (próxima etapa) lê texto + imagem com um
-        modelo de visão e extrai as questões.
+        Use este fluxo <strong>apenas para provas escaneadas ou em imagem</strong> (sem texto nativo).
+        Ele renderiza cada página e usa um modelo de visão — é mais lento e consome cota de IA. Provas com
+        texto nativo devem ir para a <Link to="/provas">Análise padrão</Link>, mais rápida e gratuita.
       </p>
 
       <div className="card">
@@ -83,25 +106,47 @@ export default function AnalisarProvaVisao() {
           <input
             type="file"
             accept="application/pdf"
-            onChange={(e) => { setArquivo(e.target.files?.[0] || null); setErro(''); }}
+            onChange={(e) => selecionarArquivo(e.target.files?.[0] || null)}
             disabled={enviando}
           />
         </label>
+
+        {avaliando && <p className="selection-help">Avaliando o PDF…</p>}
+
+        {avaliacao && avaliacao.escaneado && (
+          <p className="selection-help" style={{ color: 'var(--success, seagreen)' }}>
+            ✓ PDF escaneado/imagem (~{avaliacao.charsPorPagina} caracteres por página em {avaliacao.totalPaginas} página(s)).
+            Adequado para a análise por visão.
+          </p>
+        )}
+
+        {textoNativo && (
+          <div className="selection-summary card">
+            <div>
+              <strong>Este PDF tem texto nativo (~{avaliacao.charsPorPagina} caracteres por página).</strong>
+              <span>
+                A análise por visão é cara e desnecessária aqui. Prefira a{' '}
+                <Link to="/provas">Análise padrão</Link>, que extrai as questões localmente, de graça.
+              </span>
+            </div>
+            <label className="field" style={{ marginTop: 8 }}>
+              <span>
+                <input type="checkbox" checked={forcar} onChange={(e) => setForcar(e.target.checked)} disabled={enviando} />
+                {' '}Analisar mesmo assim por visão
+              </span>
+            </label>
+          </div>
+        )}
 
         <label className="field">
           <span>Resolução da imagem: {dpi} DPI</span>
           <input
-            type="range"
-            min={DPI_MIN}
-            max={DPI_MAX}
-            step={10}
-            value={dpi}
-            onChange={(e) => setDpi(Number(e.target.value))}
-            disabled={enviando}
+            type="range" min={DPI_MIN} max={DPI_MAX} step={10} value={dpi}
+            onChange={(e) => setDpi(Number(e.target.value))} disabled={enviando}
           />
         </label>
 
-        <button className="btn btn-primary" onClick={enviar} disabled={enviando || !arquivo}>
+        <button className="btn btn-primary" onClick={enviar} disabled={enviando || !arquivo || avaliando || bloqueado}>
           {enviando ? textoProgresso() : 'Enviar para análise'}
         </button>
         {erro && <p className="selection-help" style={{ color: 'var(--danger, crimson)' }}>{erro}</p>}

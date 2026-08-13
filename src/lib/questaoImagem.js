@@ -1,3 +1,22 @@
+// Captura de figuras, gráficos e diagramas do PDF da prova.
+//
+// O fluxo procura, em ordem:
+//
+//   1. Objetos raster (imagens embutidas) dentro da região da questão.
+//   2. Uma "faixa vetorial": o maior espaço em branco entre linhas de texto,
+//      que costuma corresponder ao gráfico desenhado como vetor.
+//   3. Como último recurso, a região textual completa da questão — assim uma
+//      tabela ou diagrama incomum nunca desaparece da importação.
+//
+// As duas opções `preferirPainelCompleto` e `fallbackQuestaoCompleta` passam a
+// ser `true` por padrão. Antes, a tela de "Analisar provas" chamava esta
+// função sem opções, o que fazia o fluxo parar no passo 1 e devolver zero
+// recortes para provas em que gráficos e tabelas são desenhados como vetor
+// puro (o caso da FATEC 2026: radares, fórmulas químicas, mapas, tabelas em
+// quadro). A importação manual sempre passou os dois `true` explicitamente e
+// funcionava; agora o padrão é o mesmo comportamento robusto para todos os
+// chamadores.
+
 import { supabase } from '../supabaseClient';
 export { criarRecortesOrigem } from './recortesQuestao.js';
 import {
@@ -91,14 +110,23 @@ function unirPainelVisual(regioes, tipoCaptura = 'painel_visual_completo') {
 }
 
 /**
- * Extrai somente figuras, gráficos e diagramas associados à questão. Imagens
- * raster usam a posição exata do objeto no PDF; elementos vetoriais usam a
- * maior faixa gráfica existente entre os trechos de texto.
+ * Extrai figuras, gráficos e diagramas associados à questão. Imagens raster
+ * usam a posição exata do objeto no PDF; elementos vetoriais usam a maior
+ * faixa gráfica existente entre os trechos de texto. Se nada disso funcionar,
+ * captura a região completa da questão como último recurso.
+ *
+ * Opções:
+ *  - `preferirPainelCompleto` (padrão: true) — quando a questão tem gráficos
+ *    e ícones desenhados como vetor, une tudo num único painel em vez de
+ *    escolher um objeto isolado. Essencial para painéis com vários gráficos.
+ *  - `fallbackQuestaoCompleta` (padrão: true) — quando nem raster nem lacuna
+ *    aparecem, captura a região textual da questão. Impede que uma questão
+ *    marcada como visual desapareça silenciosamente da importação.
  */
 export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso, opcoes = {}) {
   const {
-    preferirPainelCompleto = false,
-    fallbackQuestaoCompleta = false,
+    preferirPainelCompleto = true,
+    fallbackQuestaoCompleta = true,
   } = opcoes;
   const alvos = (questoes || []).filter((questao) => (
     questao.id && questao.dependeDeVisual && questao.recortesOrigem?.length
@@ -146,9 +174,9 @@ export async function capturarImagensQuestoesPdf(arquivo, questoes, onProgresso,
           : null;
         let regioes = regioesRasterCaptura;
 
-        // No modo de importação manual, a faixa vetorial e todos os objetos
-        // raster associados formam um único painel. É isso que impede um
-        // ícone periférico (por exemplo, o jogador) de substituir o gráfico.
+        // A faixa vetorial e todos os objetos raster associados formam um
+        // único painel. É isso que impede um ícone periférico (por exemplo,
+        // o jogador ilustrado ao lado do gráfico) de substituir o gráfico.
         if (preferirPainelCompleto && questao.alternativasRepresentadasNaImagem && recortes.length) {
           const painel = unirPainelVisual(recortes, 'questao_visual_completa');
           regioes = painel ? [painel] : [];

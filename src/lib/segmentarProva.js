@@ -13,6 +13,7 @@
 // graça o gabarito, o tópico do programa e o índice de facilidade.
 
 import { criarLacunasVisuaisOrigem, criarRecortesOrigem } from './recortesQuestao.js';
+import { aplicarDependenciaVisualExpandida } from './inferirDependenciaVisual.js';
 
 const RE_SO_SIMBOLOS = /^[\s\-–—_.·•=]*$/;
 const RE_FIM_DOCUMENTO = /^\s*(?:gabarito\s+oficial|folha\s+de\s+respostas|rascunho(?:\s+da\s+reda[çc][ãa]o)?|proposta\s+de\s+reda[çc][ãa]o)\s*$/i;
@@ -35,11 +36,19 @@ const RE_ACERTOS = /(\d{1,2}(?:[,.]\d+)?)\s*%\s*de\s+acertos/i;
 // coisas como "(texto comum para as questões 13 e 14)".
 const RE_COMPARTILHADO = /^\s*(?:Texto|Leia|Considere|Observe|Analise)\b.{0,220}?quest[õo]es?\s+((?:de\s+)?\d{1,3}(?:\s*(?:,|e|a)\s*\d{1,3})*)/i;
 
-// Palavras que indicam que a questão depende de algo que não é texto. Não é
-// motivo para descartar nada — é para marcar as questões que precisam do olho
-// humano antes de irem para a classificação.
+// Palavras que indicam que a questão depende de algo que não é texto. Esta é a
+// primeira das duas passagens de detecção: capta os casos óbvios em que o
+// enunciado nomeia o recurso. A segunda passagem, geométrica, roda depois via
+// aplicarDependenciaVisualExpandida e pega os casos em que o vocabulário não
+// bate (por exemplo, "O quadro relaciona..." ou uma tabela sem palavra-chave).
+//
+// A regex foi ampliada para cobrir o vocabulário oficial da FATEC 2026: além
+// dos termos clássicos, agora reconhece "quadro" (sinônimo de tabela na banca),
+// "fórmula" isolada, "estrutura", "radar", "bandeira", "cartaz", "mascote",
+// "logotipo", "emblema" e afins. Isso resolve os falsos negativos em Q6, Q24,
+// Q25 e Q26 sem depender só da heurística geométrica.
 const RE_VISUAL =
-  /\b(figura|gr[áa]fico|imagem|tabela|mapa|tirinha|quadrinho|infogr[áa]fico|esquema|diagrama|charge|heredograma|fluxograma|placa|desenho|fotografia|ilustra[çc][ãa]o|f[óo]rmulas? estruturais?|equa[çc][ãa]o representada)\b/i;
+  /\b(figura|gr[áa]fico|imagem|tabela|quadro|mapa|tirinha|quadrinho|infogr[áa]fico|esquema|diagrama|charge|heredograma|fluxograma|placa|desenho|fotografia|ilustra[çc][ãa]o|f[óo]rmulas?|estrutur[a-z]{0,4}|equa[çc][ãa]o|radar|bandeira|logotipo|emblema|mascote|cartaz|painel|molde|planta|croqui|reproduc[ãa]o|composi[çc][ãa]o|receita|c[óo]digo|s[íi]mbolo|selo|cartum)\b/i;
 
 export const PERFIS = {
   auto: { rotulo: 'Detectar automaticamente' },
@@ -357,7 +366,7 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
     });
   });
 
-  const questoes = aceitos.map((c, i) => {
+  const questoesBrutas = aceitos.map((c, i) => {
     const fimNatural = i + 1 < aceitos.length ? aceitos[i + 1].indice : linhas.length;
     const proximoApoio = compartilhados
       .filter((apoio) => apoio.indiceInicio > c.indice && apoio.indiceInicio < fimNatural)
@@ -388,14 +397,18 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
       ].filter(Boolean).join('\n')),
       recortesOrigem: criarRecortesOrigem(linhas, intervalosImagem),
       lacunasVisuaisOrigem: criarLacunasVisuaisOrigem(linhas, intervalosImagem),
-      
+
       paraClassificar: [apoio.map((s) => s.texto).join('\n'), partes.enunciado]
         .filter(Boolean)
         .join('\n'),
     };
   });
 
-  // Avisos: o que merece o olho humano antes de gastar token.
+  // Segunda passagem: a heurística geométrica marca `dependeDeVisual` em
+  // questões cujo enunciado não cita o recurso mas que têm uma lacuna vetorial
+  // grande ou alternativas em forma de desenho. Só liga a flag, nunca desliga.
+  const questoes = aplicarDependenciaVisualExpandida(questoesBrutas);
+
   const faltando = [];
   for (let n = questoes[0].numero; n <= questoes[questoes.length - 1].numero; n++) {
     if (!questoes.some((q) => q.numero === n)) faltando.push(n);
@@ -426,6 +439,13 @@ export function segmentarQuestoes(linhas, perfilNome = 'auto') {
   if (visuais) {
     avisos.push(
       `${visuais} questão(ões) citam figura, gráfico ou tabela. O texto sozinho pode não bastar para classificar essas.`
+    );
+  }
+
+  const inferidas = questoes.filter((q) => q.dependeDeVisualInferido).map((q) => q.numero);
+  if (inferidas.length) {
+    avisos.push(
+      `${inferidas.length} questão(ões) foram marcadas com recurso visual pela análise geométrica (sem palavra-chave no enunciado): ${inferidas.join(', ')}.`
     );
   }
 

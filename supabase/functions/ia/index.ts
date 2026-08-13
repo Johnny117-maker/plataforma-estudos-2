@@ -203,7 +203,10 @@ function modelosGroq(body: GenericBody | ClassifyBody) {
   const llama = Deno.env.get('GROQ_LLAMA_MODEL') || DEFAULT_LLAMA_MODEL;
   const gptOss = Deno.env.get('GROQ_GPT_OSS_MODEL') || DEFAULT_GPT_OSS_MODEL;
   const legado = Deno.env.get('GROQ_MODEL');
-  const preferido = body.modeloPreferido || (body.acao === 'gerar_json' ? 'gpt-oss' : 'llama');
+  // gpt-oss-20b é o substituto oficial do llama-3.1-8b-instant, desligado pela
+  // Groq em 2026-08-16. Ele passa a ser a preferência padrão; o Llama continua
+  // na lista apenas como fallback (e sai de cena via 410 quando indisponível).
+  const preferido = body.modeloPreferido || 'gpt-oss';
   const ordem = preferido === 'gpt-oss' ? [gptOss, llama] : [llama, gptOss];
   if (legado && !body.modeloPreferido) ordem.unshift(legado);
   return [...new Set(ordem.filter(Boolean))];

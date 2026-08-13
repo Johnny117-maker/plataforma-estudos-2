@@ -1,12 +1,13 @@
 // Worker do pipeline de análise por visão.
 //
 // Reivindica um analysis_job, baixa o PDF e os PNGs das páginas (renderizados
-// pelo navegador), extrai o texto nativo com unpdf (edge-friendly, sem canvas
-// nativo), envia texto + imagem ao Gemini Flash, recebe as questões em JSON
-// estruturado, recorta os elementos visuais com ImageScript e persiste tudo.
+// pelo navegador na etapa 1), extrai o texto nativo com unpdf (edge-friendly,
+// sem canvas nativo), envia texto + imagem ao Gemini Flash, recebe as questões
+// em JSON estruturado, recorta os elementos visuais com ImageScript e persiste.
 //
-// Nada de chave de IA sai daqui para o cliente. Processa um orçamento de páginas
-// por execução; o cron reprograma jobs longos ou abandonados.
+// Nada de chave de IA sai daqui para o cliente. Processa um orçamento pequeno de
+// páginas por execução e se re-invoca; o cron é a rede de segurança. Rate limit
+// (429) NÃO derruba o job: pausa e retoma sem perder o progresso.
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { extractText, getDocumentProxy } from 'npm:unpdf';
@@ -19,9 +20,12 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') || '';
 const FLASH_MODEL = Deno.env.get('GEMINI_FLASH_MODEL') || 'gemini-3.5-flash';
 const BUCKET = 'provas-visao';
-const TEMPO_MAXIMO_EXECUCAO_MS = 105_000;
-const MAX_PAGINAS_POR_EXECUCAO = 12;
-const MAX_QUESTOES_VISUAIS = 8; // recortes por página, evita explosão de storage
+const TEMPO_MAXIMO_EXECUCAO_MS = 60_000;
+const MAX_PAGINAS_POR_EXECUCAO = 4;
+const PACE_ENTRE_PAGINAS_MS = 3_000;
+const MAX_TENTATIVAS_429 = 4;
+const ESPERA_MAXIMA_429_MS = 30_000;
+const MAX_QUESTOES_VISUAIS = 8;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -33,11 +37,18 @@ const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+// Erro de rate limit: sinaliza que o job deve PAUSAR (não falhar).
+class LimiteError extends Error {}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
+}
+
+function esperar(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchComTimeout(url: string, init: RequestInit, timeoutMs: number) {
@@ -48,6 +59,12 @@ async function fetchComTimeout(url: string, init: RequestInit, timeoutMs: number
   } finally {
     clearTimeout(timer);
   }
+}
+
+function esperaDoRetryAfter(header: string | null, tentativa: number) {
+  const segundos = Number(header);
+  const base = Number.isFinite(segundos) && segundos > 0 ? segundos * 1_000 : 6_000 * 2 ** tentativa;
+  return Math.min(ESPERA_MAXIMA_429_MS, Math.max(2_000, base));
 }
 
 function extrairJson(texto: string) {
@@ -73,37 +90,45 @@ function textoDaInteracao(payload: Record<string, unknown>) {
   return '';
 }
 
-// Upload da página ao Gemini Files API (mesmo fluxo da função `ia`).
+// Upload da página ao Gemini Files API, com retry em 429 (mesmo fluxo da `ia`).
 async function uploadGemini(bytes: Uint8Array, nome: string) {
-  const inicio = await fetchComTimeout('https://generativelanguage.googleapis.com/upload/v1beta/files', {
-    method: 'POST',
-    headers: {
-      'x-goog-api-key': GEMINI_API_KEY,
-      'X-Goog-Upload-Protocol': 'resumable',
-      'X-Goog-Upload-Command': 'start',
-      'X-Goog-Upload-Header-Content-Length': String(bytes.byteLength),
-      'X-Goog-Upload-Header-Content-Type': 'image/png',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ file: { display_name: nome } }),
-  }, 30_000);
-  const uploadUrl = inicio.headers.get('x-goog-upload-url');
-  if (!inicio.ok || !uploadUrl) throw new Error('Não foi possível preparar a imagem para o Gemini.');
+  for (let tentativa = 0; ; tentativa += 1) {
+    const inicio = await fetchComTimeout('https://generativelanguage.googleapis.com/upload/v1beta/files', {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': GEMINI_API_KEY,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(bytes.byteLength),
+        'X-Goog-Upload-Header-Content-Type': 'image/png',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { display_name: nome } }),
+    }, 30_000);
 
-  const enviado = await fetchComTimeout(uploadUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Length': String(bytes.byteLength),
-      'X-Goog-Upload-Offset': '0',
-      'X-Goog-Upload-Command': 'upload, finalize',
-    },
-    body: bytes as unknown as BodyInit,
-  }, 60_000);
-  if (!enviado.ok) throw new Error('Não foi possível enviar a imagem ao Gemini.');
-  const payload = await enviado.json();
-  const file = payload?.file;
-  if (!file?.uri) throw new Error('O Gemini não confirmou a imagem enviada.');
-  return file as { uri: string; name?: string };
+    if (inicio.status === 429) {
+      if (tentativa >= MAX_TENTATIVAS_429) throw new LimiteError('Limite do Gemini no upload da imagem.');
+      await esperar(esperaDoRetryAfter(inicio.headers.get('retry-after'), tentativa));
+      continue;
+    }
+    const uploadUrl = inicio.headers.get('x-goog-upload-url');
+    if (!inicio.ok || !uploadUrl) throw new Error('Não foi possível preparar a imagem para o Gemini.');
+
+    const enviado = await fetchComTimeout(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Length': String(bytes.byteLength),
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      body: bytes as unknown as BodyInit,
+    }, 60_000);
+    if (!enviado.ok) throw new Error('Não foi possível enviar a imagem ao Gemini.');
+    const payload = await enviado.json();
+    const file = payload?.file;
+    if (!file?.uri) throw new Error('O Gemini não confirmou a imagem enviada.');
+    return file as { uri: string; name?: string };
+  }
 }
 
 async function apagarArquivoGemini(name: string | undefined) {
@@ -169,7 +194,24 @@ type QuestaoVisao = {
   elementos_visuais?: ElementoVisual[];
 };
 
-// Envia texto + imagem da página e recebe as questões estruturadas.
+// Chama o endpoint de interações do Gemini com retry em 429.
+async function interacaoGemini(requestBody: unknown, numeroPagina: number) {
+  for (let tentativa = 0; ; tentativa += 1) {
+    const response = await fetchComTimeout('https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'POST',
+      headers: { 'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    }, 120_000);
+    if (response.status === 429) {
+      if (tentativa >= MAX_TENTATIVAS_429) throw new LimiteError(`Limite do Gemini na página ${numeroPagina}.`);
+      await esperar(esperaDoRetryAfter(response.headers.get('retry-after'), tentativa));
+      continue;
+    }
+    if (!response.ok) throw new Error(`Gemini respondeu ${response.status} na página ${numeroPagina}.`);
+    return response.json();
+  }
+}
+
 async function extrairQuestoesDaPagina(textoPagina: string, imagemBytes: Uint8Array, numeroPagina: number) {
   const file = await uploadGemini(imagemBytes, `pagina-${numeroPagina}.png`);
   try {
@@ -182,7 +224,7 @@ Não resolva nem classifique. Responda só JSON.
 TEXTO EXTRAÍDO DA PÁGINA:
 ${textoPagina.slice(0, 6_000)}`;
 
-    const requestBody = {
+    const payload = await interacaoGemini({
       model: FLASH_MODEL,
       input: [
         { type: 'text', text: prompt },
@@ -190,18 +232,9 @@ ${textoPagina.slice(0, 6_000)}`;
       ],
       generation_config: { thinking_level: 'minimal' },
       response_format: schemaQuestoes(),
-    };
+    }, numeroPagina);
 
-    const response = await fetchComTimeout('https://generativelanguage.googleapis.com/v1beta/interactions', {
-      method: 'POST',
-      headers: { 'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    }, 120_000);
-    if (!response.ok) {
-      const status = response.status === 429 ? 429 : response.status;
-      throw new Error(`Gemini respondeu ${status} na página ${numeroPagina}.`);
-    }
-    const texto = textoDaInteracao(await response.json());
+    const texto = textoDaInteracao(payload);
     if (!texto) throw new Error(`Gemini retornou resposta vazia na página ${numeroPagina}.`);
     const resultado = extrairJson(texto) as { questoes?: QuestaoVisao[] };
     return Array.isArray(resultado.questoes) ? resultado.questoes : [];
@@ -266,8 +299,8 @@ async function processarPagina(prefixo: string, numero: number, textoPagina: str
 
 type JobLote = { id: string; storage_prefix: string; total_paginas: number; paginas_processadas: number };
 
-// Processa um lote de páginas (orçamento de páginas e de tempo). Devolve se o
-// job ficou completo.
+// Processa um lote de páginas (orçamento de páginas e de tempo).
+// done = job completo; limitado = pausou por rate limit (retomar depois).
 async function processarLote(job: JobLote, prazoFinal: number) {
   const pdfBytes = await baixarBytes(`${job.storage_prefix}/original.pdf`);
   const pdf = await getDocumentProxy(pdfBytes);
@@ -282,19 +315,25 @@ async function processarLote(job: JobLote, prazoFinal: number) {
     && Date.now() < prazoFinal;
     numero += 1
   ) {
-    const resultadoPagina = await processarPagina(job.storage_prefix, numero, textos[numero - 1] || '');
-    const { error } = await admin.rpc('anexar_pagina_analysis_job', {
-      p_job_id: job.id,
-      p_pagina: resultadoPagina,
-    });
-    if (error) throw new Error(`Falha ao gravar a página ${numero}: ${error.message}`);
-    processadas = numero;
+    try {
+      const resultadoPagina = await processarPagina(job.storage_prefix, numero, textos[numero - 1] || '');
+      const { error } = await admin.rpc('anexar_pagina_analysis_job', {
+        p_job_id: job.id,
+        p_pagina: resultadoPagina,
+      });
+      if (error) throw new Error(`Falha ao gravar a página ${numero}: ${error.message}`);
+      processadas = numero;
+      if (numero < job.total_paginas) await esperar(PACE_ENTRE_PAGINAS_MS);
+    } catch (erro) {
+      if (erro instanceof LimiteError) return { done: false, limitado: true };
+      throw erro;
+    }
   }
-  return { done: processadas >= job.total_paginas };
+  return { done: processadas >= job.total_paginas, limitado: false };
 }
 
 // Re-invoca o próprio worker para continuar um job que não coube em uma
-// execução. É a continuação imediata; o cron é a rede de segurança.
+// execução. Continuação imediata; o cron é a rede de segurança.
 function invocarSelf(jobId: string) {
   return fetch(`${SUPABASE_URL}/functions/v1/analise-visao-worker`, {
     method: 'POST',
@@ -309,8 +348,10 @@ function invocarSelf(jobId: string) {
 
 async function processarComContinuacao(job: JobLote, prazoFinal: number) {
   try {
-    const { done } = await processarLote(job, prazoFinal);
-    if (!done) EdgeRuntime.waitUntil(invocarSelf(job.id));
+    const { done, limitado } = await processarLote(job, prazoFinal);
+    // Rate limit: deixa o job 'processing' para o cron retomar mais tarde, sem
+    // re-invocar na hora (bateria no mesmo 429).
+    if (!done && !limitado) EdgeRuntime.waitUntil(invocarSelf(job.id));
   } catch (erro) {
     await admin.rpc('falhar_analysis_job', {
       p_job_id: job.id,
@@ -319,8 +360,7 @@ async function processarComContinuacao(job: JobLote, prazoFinal: number) {
   }
 }
 
-// Continua um job específico (chamado pela auto-continuação), sem passar pelo
-// claim — o job já está 'processing' e pertence a esta cadeia de execução.
+// Continua um job específico (auto-continuação), sem passar pelo claim.
 async function continuarJob(jobId: string, prazoFinal: number) {
   const { data } = await admin.from('analysis_jobs')
     .select('id, storage_prefix, total_paginas, paginas_processadas, status')

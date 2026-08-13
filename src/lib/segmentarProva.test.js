@@ -14,6 +14,10 @@ describe('segmentarTextoBruto', () => {
     const resultado = segmentarTextoBruto(texto, 'fatec');
     expect(resultado.questoes[0].alternativas).toHaveLength(5);
     expect(resultado.questoes[0].alternativas[0]).toContain('continuação da alternativa A');
+    // A letra é lida da primeira linha da alternativa, mesmo quando ela quebra:
+    // sem isso a alternativa A ficava de fora e disparava aviso de conjunto incompleto.
+    expect(resultado.questoes[0].letras).toEqual(['A', 'B', 'C', 'D', 'E']);
+    expect(resultado.avisos.join(' ')).not.toContain('conjunto completo');
   });
 
   it('não anexa à alternativa E o texto de apoio das questões seguintes', () => {

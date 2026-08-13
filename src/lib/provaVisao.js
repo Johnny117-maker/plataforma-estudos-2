@@ -121,7 +121,39 @@ export async function enviarProvaParaAnalise(arquivoPdf, { dpi = DPI_PADRAO, nom
   });
   if (error) throw new Error(`Falha ao criar o job: ${error.message}`);
 
+  // Acorda o worker na hora; o cron é a segunda linha de recuperação.
+  acordarWorkerVisao().catch(() => {});
+
   return { jobId: data, prefixo, totalPaginas: paginas.length };
+}
+
+/** Dispara o worker imediatamente (best-effort). */
+export async function acordarWorkerVisao() {
+  const { error } = await supabase.functions.invoke('analise-visao-worker', { body: { acao: 'acordar' } });
+  if (error) throw new Error(error.message);
+}
+
+/** bbox normalizado (0..1) → retângulo em pixels; espelha a lógica do worker. */
+export function bboxParaPixels(bbox, largura, altura) {
+  const [x0 = 0, y0 = 0, x1 = 1, y1 = 1] = Array.isArray(bbox) ? bbox : [];
+  const px = Math.max(0, Math.min(largura - 1, Math.round(Math.min(x0, x1) * largura)));
+  const py = Math.max(0, Math.min(altura - 1, Math.round(Math.min(y0, y1) * altura)));
+  const w = Math.max(1, Math.min(largura - px, Math.round(Math.abs(x1 - x0) * largura)));
+  const h = Math.max(1, Math.min(altura - py, Math.round(Math.abs(y1 - y0) * altura)));
+  return { px, py, w, h };
+}
+
+/** Resumo do resultado do worker para exibição. */
+export function resumirResultadoVisao(resultado) {
+  const paginas = Array.isArray(resultado) ? resultado : [];
+  let questoes = 0;
+  let imagens = 0;
+  for (const pagina of paginas) {
+    const lista = Array.isArray(pagina?.questoes) ? pagina.questoes : [];
+    questoes += lista.length;
+    for (const questao of lista) imagens += Array.isArray(questao?.imagens) ? questao.imagens.length : 0;
+  }
+  return { paginas: paginas.length, questoes, imagens };
 }
 
 /** Últimos jobs do usuário (RLS garante que só vêm os dele). */

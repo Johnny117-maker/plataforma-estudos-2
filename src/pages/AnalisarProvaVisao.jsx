@@ -37,6 +37,14 @@ export default function AnalisarProvaVisao() {
 
   useEffect(() => { carregarJobs(); }, []);
 
+  // Enquanto houver job na fila ou processando, atualiza o progresso ao vivo.
+  useEffect(() => {
+    const ativo = jobs.some((job) => job.status === 'pending' || job.status === 'processing');
+    if (!ativo) return undefined;
+    const timer = setInterval(() => { carregarJobs(); }, 5_000);
+    return () => clearInterval(timer);
+  }, [jobs]);
+
   async function enviar() {
     if (!arquivo) return;
     setEnviando(true);

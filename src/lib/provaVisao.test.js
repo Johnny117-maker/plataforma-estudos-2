@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   clampDpi, escalaDpi, caminhoPdf, caminhoPaginaPng,
+  bboxParaPixels, resumirResultadoVisao,
   DPI_MIN, DPI_MAX, DPI_PADRAO,
 } from './provaVisao';
 
@@ -44,5 +45,43 @@ describe('caminhos de storage', () => {
     expect(caminhoPaginaPng('uid/job', 1)).toBe('uid/job/pagina-001.png');
     expect(caminhoPaginaPng('uid/job', 24)).toBe('uid/job/pagina-024.png');
     expect(caminhoPaginaPng('uid/job', 130)).toBe('uid/job/pagina-130.png');
+  });
+});
+
+describe('bboxParaPixels', () => {
+  it('converte bbox normalizado em retângulo de pixels', () => {
+    expect(bboxParaPixels([0.1, 0.2, 0.6, 0.5], 1000, 2000)).toEqual({ px: 100, py: 400, w: 500, h: 600 });
+  });
+
+  it('normaliza a ordem dos cantos (x1<x0)', () => {
+    expect(bboxParaPixels([0.6, 0.5, 0.1, 0.2], 1000, 2000)).toEqual({ px: 100, py: 400, w: 500, h: 600 });
+  });
+
+  it('prende o recorte aos limites da imagem', () => {
+    const r = bboxParaPixels([0.9, 0.9, 1.5, 1.5], 1000, 1000);
+    expect(r.px).toBeLessThanOrEqual(999);
+    expect(r.px + r.w).toBeLessThanOrEqual(1000);
+    expect(r.py + r.h).toBeLessThanOrEqual(1000);
+  });
+
+  it('garante recorte mínimo de 1px para bbox degenerado', () => {
+    const r = bboxParaPixels([0.5, 0.5, 0.5, 0.5], 800, 600);
+    expect(r.w).toBeGreaterThanOrEqual(1);
+    expect(r.h).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('resumirResultadoVisao', () => {
+  it('conta páginas, questões e imagens', () => {
+    const resultado = [
+      { pagina: 1, questoes: [{ numero: 1, imagens: ['a.png'] }, { numero: 2, imagens: [] }] },
+      { pagina: 2, questoes: [{ numero: 3, imagens: ['b.png', 'c.png'] }] },
+    ];
+    expect(resumirResultadoVisao(resultado)).toEqual({ paginas: 2, questoes: 3, imagens: 3 });
+  });
+
+  it('lida com resultado vazio ou inválido', () => {
+    expect(resumirResultadoVisao([])).toEqual({ paginas: 0, questoes: 0, imagens: 0 });
+    expect(resumirResultadoVisao(null)).toEqual({ paginas: 0, questoes: 0, imagens: 0 });
   });
 });

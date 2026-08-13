@@ -22,6 +22,9 @@ export default function Sidebar() {
       <NavLink to="/provas" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
         Analisar Prova
       </NavLink>
+      <NavLink to="/provas-visao" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
+        Analisar Prova (visão)
+      </NavLink>
       <NavLink to="/processamentos" className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}>
         Histórico de Processamentos
       </NavLink>

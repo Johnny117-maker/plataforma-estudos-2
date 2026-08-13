@@ -46,6 +46,7 @@ import {
   salvarAnaliseProvas,
 } from '../lib/transactionService';
 import PlanejarCronogramaPanel from '../components/PlanejarCronogramaPanel';
+import EstruturaProvaPanel from '../components/EstruturaProvaPanel';
 
 const MAX_ARQUIVOS = 20;
 const MAX_BYTES = 25 * 1024 * 1024;
@@ -1132,6 +1133,10 @@ export default function AnalisarProva() {
                 </tbody>
               </table>
             </div>
+          )}
+
+          {documentosSelecionados.length > 0 && (
+            <EstruturaProvaPanel documentosSelecionados={documentosSelecionados} />
           )}
 
           {frequencias.length > 0 && (

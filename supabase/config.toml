@@ -4,5 +4,8 @@ verify_jwt = true
 [functions.analise-worker]
 verify_jwt = true
 
+[functions.analisar-estrutura]
+verify_jwt = true
+
 [edge_runtime]
 policy = "per_worker"

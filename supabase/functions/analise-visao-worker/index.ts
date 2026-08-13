@@ -19,7 +19,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') || '';
 const FLASH_MODEL = Deno.env.get('GEMINI_FLASH_MODEL') || 'gemini-3.5-flash';
+const FLASH_LITE_MODEL = Deno.env.get('GEMINI_FLASH_LITE_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.5-flash-lite';
 const BUCKET = 'provas-visao';
+// Página com texto nativo suficiente não precisa de visão: extrai por texto.
+const MINIMO_CHARS_POR_PAGINA = 200;
 const TEMPO_MAXIMO_EXECUCAO_MS = 60_000;
 const MAX_PAGINAS_POR_EXECUCAO = 4;
 const PACE_ENTRE_PAGINAS_MS = 3_000;
@@ -243,6 +246,31 @@ ${textoPagina.slice(0, 6_000)}`;
   }
 }
 
+// Página com texto nativo: extração só por texto (Flash-Lite, barato). Sem
+// upload de imagem, sem recorte — o custo de visão é reservado ao escaneado.
+async function extrairQuestoesDeTexto(textoPagina: string, numeroPagina: number) {
+  const prompt = `Este é o TEXTO NATIVO da página ${numeroPagina} de uma prova de vestibular (camada de texto do PDF).
+Extraia as questões: para cada uma, número, enunciado e alternativas (letra + texto).
+Não invente questões. Se não houver questões nesta página, devolva "questoes": [].
+Deixe "elementos_visuais" como lista vazia (esta extração é textual).
+Não resolva nem classifique. Responda só JSON.
+
+TEXTO DA PÁGINA:
+${textoPagina.slice(0, 8_000)}`;
+
+  const payload = await interacaoGemini({
+    model: FLASH_LITE_MODEL,
+    input: [{ type: 'text', text: prompt }],
+    generation_config: { thinking_level: 'minimal' },
+    response_format: schemaQuestoes(),
+  }, numeroPagina);
+
+  const texto = textoDaInteracao(payload);
+  if (!texto) throw new Error(`Gemini retornou resposta vazia (texto) na página ${numeroPagina}.`);
+  const resultado = extrairJson(texto) as { questoes?: QuestaoVisao[] };
+  return Array.isArray(resultado.questoes) ? resultado.questoes : [];
+}
+
 // bbox normalizado (0..1) -> retângulo em pixels, preso aos limites da imagem.
 function bboxParaPixels(bbox: number[], largura: number, altura: number) {
   const [x0 = 0, y0 = 0, x1 = 1, y1 = 1] = bbox || [];
@@ -260,6 +288,23 @@ async function baixarBytes(caminho: string) {
 }
 
 async function processarPagina(prefixo: string, numero: number, textoPagina: string) {
+  // Página com texto nativo suficiente: extração textual barata, sem visão.
+  if (textoPagina.trim().length >= MINIMO_CHARS_POR_PAGINA) {
+    const questoes = await extrairQuestoesDeTexto(textoPagina, numero);
+    return {
+      pagina: numero,
+      origem: 'texto_nativo',
+      questoes: questoes.map((questao) => ({
+        numero: questao.numero ?? null,
+        enunciado: String(questao.enunciado || ''),
+        alternativas: Array.isArray(questao.alternativas) ? questao.alternativas : [],
+        elementos_visuais: [],
+        imagens: [],
+      })),
+    };
+  }
+
+  // Página escaneada/imagem: visão + recortes.
   const imagemBytes = await baixarBytes(`${prefixo}/pagina-${String(numero).padStart(3, '0')}.png`);
   const questoes = await extrairQuestoesDaPagina(textoPagina, imagemBytes, numero);
 
@@ -294,7 +339,7 @@ async function processarPagina(prefixo: string, numero: number, textoPagina: str
       imagens,
     });
   }
-  return { pagina: numero, questoes: saida };
+  return { pagina: numero, origem: 'visao', questoes: saida };
 }
 
 type JobLote = { id: string; storage_prefix: string; total_paginas: number; paginas_processadas: number };

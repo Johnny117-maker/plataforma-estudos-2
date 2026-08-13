@@ -75,6 +75,9 @@ Worker (edge: analise-visao-worker) — cron 1/min + auto-continuação
 **Secrets da Edge Function (Supabase):**
 - `GEMINI_API_KEY` (obrigatório)
 - `GEMINI_FLASH_MODEL` (visão), `GEMINI_FLASH_LITE_MODEL` ou `GEMINI_MODEL` (texto)
+- `GROQ_API_KEY` (opcional): usado no caminho **só-texto** (cota separada do
+  Gemini); se ausente ou limitado, o worker cai para o Gemini Flash-Lite.
+  `GROQ_GPT_OSS_MODEL` ajusta o modelo (padrão `openai/gpt-oss-20b`).
 - `ALLOWED_ORIGINS`
 - `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` são injetados automaticamente.
 

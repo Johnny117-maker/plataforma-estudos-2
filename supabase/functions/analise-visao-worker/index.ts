@@ -20,6 +20,7 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') || '';
 const FLASH_MODEL = Deno.env.get('GEMINI_FLASH_MODEL') || 'gemini-3.5-flash';
 const FLASH_LITE_MODEL = Deno.env.get('GEMINI_FLASH_LITE_MODEL') || Deno.env.get('GEMINI_MODEL') || 'gemini-3.5-flash-lite';
+const GROQ_MODEL = Deno.env.get('GROQ_GPT_OSS_MODEL') || 'openai/gpt-oss-20b';
 const BUCKET = 'provas-visao';
 // Página com texto nativo suficiente não precisa de visão: extrai por texto.
 const MINIMO_CHARS_POR_PAGINA = 200;
@@ -246,25 +247,67 @@ ${textoPagina.slice(0, 6_000)}`;
   }
 }
 
-// Página com texto nativo: extração só por texto (Flash-Lite, barato). Sem
-// upload de imagem, sem recorte — o custo de visão é reservado ao escaneado.
-async function extrairQuestoesDeTexto(textoPagina: string, numeroPagina: number) {
-  const prompt = `Este é o TEXTO NATIVO da página ${numeroPagina} de uma prova de vestibular (camada de texto do PDF).
-Extraia as questões: para cada uma, número, enunciado e alternativas (letra + texto).
-Não invente questões. Se não houver questões nesta página, devolva "questoes": [].
-Deixe "elementos_visuais" como lista vazia (esta extração é textual).
-Não resolva nem classifique. Responda só JSON.
+function promptQuestoesDeTexto(textoPagina: string, numeroPagina: number) {
+  const system = 'Você extrai questões de vestibular a partir do TEXTO NATIVO de uma página de prova. Responda somente com JSON válido, sem markdown.';
+  const user = `Página ${numeroPagina}. Extraia as questões desta página.
+Para cada questão: "numero" (inteiro), "enunciado" (string) e "alternativas" (lista de {"letra","texto"}).
+Não invente questões. Se não houver questões, devolva {"questoes":[]}. Deixe "elementos_visuais" como lista vazia.
+Não resolva nem classifique.
+Formato: {"questoes":[{"numero":1,"enunciado":"...","alternativas":[{"letra":"A","texto":"..."}],"elementos_visuais":[]}]}
 
 TEXTO DA PÁGINA:
 ${textoPagina.slice(0, 8_000)}`;
+  return { system, user };
+}
+
+// Extração por texto usando Groq (cota separada do Gemini), com retry em 429.
+async function extrairComGroq(system: string, user: string, numeroPagina: number, apiKey: string) {
+  for (let tentativa = 0; ; tentativa += 1) {
+    const response = await fetchComTimeout('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        temperature: 0.1,
+        max_tokens: 4_000,
+        response_format: { type: 'json_object' },
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      }),
+    }, 60_000);
+    if (response.status === 429) {
+      if (tentativa >= 2) throw new LimiteError(`Groq limitado na página ${numeroPagina}.`);
+      await esperar(esperaDoRetryAfter(response.headers.get('retry-after'), tentativa));
+      continue;
+    }
+    if (!response.ok) throw new Error(`Groq respondeu ${response.status} na página ${numeroPagina}.`);
+    const payload = await response.json();
+    const conteudo = payload?.choices?.[0]?.message?.content;
+    if (typeof conteudo !== 'string') throw new Error(`Groq retornou resposta vazia na página ${numeroPagina}.`);
+    const resultado = extrairJson(conteudo) as { questoes?: QuestaoVisao[] };
+    return Array.isArray(resultado.questoes) ? resultado.questoes : [];
+  }
+}
+
+// Página com texto nativo: extração só por texto, sem imagem nem recorte.
+// Groq primeiro (cota separada e generosa); Gemini Flash-Lite como fallback.
+async function extrairQuestoesDeTexto(textoPagina: string, numeroPagina: number) {
+  const { system, user } = promptQuestoesDeTexto(textoPagina, numeroPagina);
+  const groqKey = Deno.env.get('GROQ_API_KEY');
+
+  if (groqKey) {
+    try {
+      return await extrairComGroq(system, user, numeroPagina, groqKey);
+    } catch {
+      // Groq limitado ou indisponível → cai para o Gemini Flash-Lite.
+    }
+  }
 
   const payload = await interacaoGemini({
     model: FLASH_LITE_MODEL,
-    input: [{ type: 'text', text: prompt }],
+    input: [{ type: 'text', text: `${system}\n\n${user}` }],
     generation_config: { thinking_level: 'minimal' },
     response_format: schemaQuestoes(),
   }, numeroPagina);
-
   const texto = textoDaInteracao(payload);
   if (!texto) throw new Error(`Gemini retornou resposta vazia (texto) na página ${numeroPagina}.`);
   const resultado = extrairJson(texto) as { questoes?: QuestaoVisao[] };
